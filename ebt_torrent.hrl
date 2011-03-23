@@ -11,7 +11,7 @@
 -record(torrent_info,
         {piece_length,
          pieces,
-         private = 0,  % optional
+         private,      % optional
          name,
          length,       % single file mode
          md5sum,       % single file mode, optional

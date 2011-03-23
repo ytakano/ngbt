@@ -82,7 +82,8 @@ load_announce_list([{list, H} | T], Torrent) when is_list(H) ->
 load_announce_list([_ | T], Torrent) ->
     load_announce_list(T, Torrent);
 load_announce_list([], Torrent) ->
-    Torrent.
+    NewList = lists:reverse(Torrent#torrent.announce_list),
+    Torrent#torrent{announce_list = NewList}.
 
 load_info({dict, Dict}, Torrent) ->
     Keys = dict:fetch_keys(Dict),
@@ -159,7 +160,7 @@ load_files([{dict, Dict} | T], Files, Info) ->
 load_files([_ | T], Files, Info) ->
     load_files(T, Files, Info);
 load_files([], Files, Info) ->
-    Info#torrent_info{files = Files}.
+    Info#torrent_info{files = lists:reverse(Files)}.
 
 load_file(Dict) ->
     Keys = dict:fetch_keys(Dict),

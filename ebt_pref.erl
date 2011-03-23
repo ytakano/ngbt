@@ -49,7 +49,7 @@ init() ->
 
 %%--------------------------------------------------------------------
 %% @doc
-%% Initialize
+%% get the id of peer
 %%
 %% @spec get_peer_id() -> {ok, ID}
 %% @end
@@ -174,10 +174,7 @@ initialize() ->
 
 gen_peer_id() ->
     RND = crypto:rand_bytes(8),
-    list_to_binary("-ET" ++ bin_to_hexstr(RND) ++ "-").
-
-bin_to_hexstr(Bin) ->
-    lists:flatten([io_lib:format("~2.16.0B", [X]) || X <- binary_to_list(Bin)]).
+    list_to_binary("-ET" ++ ebt_lib:bin_to_hexstr(RND) ++ "-").
 
 print_pref(State) ->
     case is_binary(State#state.peer_id) of
