@@ -14,10 +14,10 @@
 %% API
 %%====================================================================
 decode(Data) ->
-    case catch dec(Data) of
-	{'EXIT', _} ->
+    case catch dec(Data, 0) of
+	{'EXIT', _, _} ->
 	    {error, unparsed};
-	{Res, _} ->
+	{Res, _, _} ->
 	    {ok, Res}
     end.
 
@@ -30,39 +30,48 @@ encode(Struct) ->
 %%--------------------------------------------------------------------
 %% Decoding
 %%--------------------------------------------------------------------
-dec(<<$l, Tail/binary>>) ->
-    dec_list(Tail, []);
-dec(<<$d, Tail/binary>>) ->
-    dec_dict(Tail, ?DICT:new());
-dec(<<$i, Tail/binary>>) ->
-    dec_int(Tail, []);
-dec(Data) ->
-    dec_string(Data, []).
+dec(<<$l, Tail/binary>>, N) ->
+    dec_list(Tail, [], N + 1);
+dec(<<$d, Tail/binary>>, N) ->
+    dec_dict(Tail, ?DICT:new(), N + 1);
+dec(<<$i, Tail/binary>>, N) ->
+    dec_int(Tail, [], N + 1);
+dec(Data, N) ->
+    dec_string(Data, [], N).
 
-dec_int(<<$e, Tail/binary>>, Acc) ->
-    {list_to_integer(lists:reverse(Acc)), Tail};
-dec_int(<<X, Tail/binary>>, Acc) ->
-    dec_int(Tail, [X|Acc]).
+dec_int(<<$e, Tail/binary>>, Acc, N) ->
+    {list_to_integer(lists:reverse(Acc)), Tail, N + 1};
+dec_int(<<X, Tail/binary>>, Acc, N) ->
+    dec_int(Tail, [X|Acc], N + 1).
 
-dec_string(<<$:, Tail/binary>>, Acc) ->
+dec_string(<<$:, Tail/binary>>, Acc, N) ->
     Int = list_to_integer(lists:reverse(Acc)),
     <<Str:Int/binary, Rest/binary>> = Tail,
-    {Str, Rest};
-dec_string(<<X, Tail/binary>>, Acc) ->
-    dec_string(Tail, [X|Acc]).
+    {Str, Rest, N + Int + 1};
+dec_string(<<X, Tail/binary>>, Acc, N) ->
+    dec_string(Tail, [X|Acc], N + 1).
 
-dec_list(<<$e, Tail/binary>>, Acc) ->
-    {{list, lists:reverse(Acc)}, Tail};
-dec_list(Data, Acc) ->
-    {Res, Tail} = dec(Data),
-    dec_list(Tail, [Res|Acc]).
+dec_list(<<$e, Tail/binary>>, Acc, N) ->
+    {{list, lists:reverse(Acc)}, Tail, N + 1};
+dec_list(Data, Acc, N) ->
+    {Res, Tail, N1} = dec(Data, N),
+    dec_list(Tail, [Res|Acc], N1).
 
-dec_dict(<<$e, Tail/binary>>, Acc) ->
-    {{dict, Acc}, Tail};
-dec_dict(Data, Acc) ->
-    {Key, Tail1} = dec(Data),
-    {Val, Tail2} = dec(Tail1),
-    dec_dict(Tail2, ?DICT:store(Key, Val, Acc)).
+dec_dict(<<$e, Tail/binary>>, Acc, N) ->
+    {{dict, Acc}, Tail, N + 1};
+dec_dict(Data, Acc, N) ->
+    {Key, Tail1, N1} = dec(Data, N),
+    {Val, Tail2, N2} = dec(Tail1, N1),
+
+    case Key of
+        <<"info">> ->
+            put(info_begin, N1),
+            put(info_len, N2 - N1 - 1);
+        _ ->
+            ok
+    end,
+    
+    dec_dict(Tail2, ?DICT:store(Key, Val, Acc), N2).
 
 %%--------------------------------------------------------------------
 %% Encoding

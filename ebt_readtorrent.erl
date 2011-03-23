@@ -9,13 +9,19 @@ read(File) ->
         {ok, Binary} ->
             case ebt_bencode:decode(Binary) of
                 {ok, Data} ->
-                    {ok, load_torrent(Data)};
+                    Hash = info_hash(Binary, get(info_begin), get(info_len)),
+                    {ok, load_torrent(Data), Hash};
                 {error, Reason} ->
                     {error, Reason}
             end;
         {error, Reason} ->
             {error, Reason}
     end.
+
+info_hash(Binary, Pos, Len) when is_integer(Pos) and is_integer(Len) ->
+    crypto:sha(binary:part(Binary, {Pos, Len}));
+info_hash(_, _, _) ->
+    <<>>.
 
 load_torrent({dict, Dict}) ->
     Keys = dict:fetch_keys(Dict),
@@ -32,7 +38,8 @@ load_torrent([<<"info">> | T], Dict, Torrent) ->
 load_torrent([<<"announce">> | T], Dict, Torrent) ->
     case dict:find(<<"announce">>, Dict) of
         {ok, Value} when is_binary(Value) ->
-            load_torrent(T, Dict, Torrent#torrent{announce = Value});
+            load_torrent(T, Dict,
+                         Torrent#torrent{announce = binary_to_list(Value)});
         _ ->
             load_torrent(T, Dict, Torrent)
     end;
@@ -77,7 +84,8 @@ load_torrent([], _, Torrent) ->
     Torrent.
 
 load_announce_list([{list, H} | T], Torrent) when is_list(H) ->
-    NewList = [H | Torrent#torrent.announce_list],
+    L = [binary_to_list(URL) || URL <- H, is_binary(URL)],
+    NewList = [L | Torrent#torrent.announce_list],
     load_announce_list(T, Torrent#torrent{announce_list = NewList});
 load_announce_list([_ | T], Torrent) ->
     load_announce_list(T, Torrent);

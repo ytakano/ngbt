@@ -22,7 +22,7 @@
 
 -include("ebt_torrent.hrl").
 
--record(state, {torrent}).
+-record(state, {torrent, info_hash}).
 
 %%%===================================================================
 %%% API
@@ -101,13 +101,13 @@ init([]) ->
 %% @end
 %%--------------------------------------------------------------------
 handle_call({read_torrent, File}, _From, State) ->
-    {Reply, Torrent} = case ebt_readtorrent:read(File) of
-                           {ok, Data} ->
-                               {ok, Data};
-                           {error, Reason} ->
-                               {{error, Reason}, State#state.torrent}
-                       end,
-    {reply, Reply, State#state{torrent = Torrent}};
+    {Reply, Torrent, Hash} = case ebt_readtorrent:read(File) of
+                                 {ok, Data, SHA1} ->
+                                     {ok, Data, SHA1};
+                                 {error, Reason} ->
+                                     {{error, Reason}, State#state.torrent}
+                             end,
+    {reply, Reply, State#state{torrent = Torrent, info_hash = Hash}};
 handle_call(print_torrent, _From, State) ->
     print_torrent_info(State#state.torrent),
     Reply = ok,
@@ -181,7 +181,7 @@ print_torrent_info(Torrent) ->
     print_encoding(Torrent#torrent.encoding),
     print_info(Torrent#torrent.info).
 
-print_announce(Announce) when is_binary(Announce) ->
+print_announce(Announce) when is_list(Announce) ->
     io:format("announce: ~s~n", [Announce]);
 print_announce(_) ->
     ok.
@@ -196,9 +196,9 @@ print_announce_lists([H | T], N) ->
 print_announce_lists([], _) ->
     ok.
 
-print_announce_list([H]) when is_binary(H)->
+print_announce_list([H]) when is_list(H)->
     io:format("~s~n", [H]);
-print_announce_list([H | T]) when is_binary(H) ->
+print_announce_list([H | T]) when is_list(H) ->
     io:format("~s, ", [H]),
     print_announce_list(T);
 print_announce_list([]) ->
