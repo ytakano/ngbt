@@ -11,9 +11,9 @@
 -behaviour(gen_server).
 
 %% API
--export([start_link/0, stop/1]).
+-export([start_link/1, stop/1]).
 -export([read_torrent/2, print_torrent/1]).
--export([start_download/1]).
+-export([start_download/1, stop_download/1]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
@@ -23,7 +23,7 @@
 
 -include("ebt_torrent.hrl").
 
--record(state, {torrent, info_hash}).
+-record(state, {torrent, info_hash, pid_pref, pid_tracker_client}).
 
 %%%===================================================================
 %%% API
@@ -33,11 +33,11 @@
 %% @doc
 %% Starts the server
 %%
-%% @spec start_link() -> {ok, Pid} | ignore | {error, Error}
+%% @spec start_link(PIDPref) -> {ok, Pid} | ignore | {error, Error}
 %% @end
 %%--------------------------------------------------------------------
-start_link() ->
-    gen_server:start_link(?MODULE, [], []).
+start_link(PIDPref) ->
+    gen_server:start_link(?MODULE, [PIDPref], []).
 
 %%--------------------------------------------------------------------
 %% @doc
@@ -73,11 +73,21 @@ print_torrent(PID) ->
 %% @doc
 %% start download
 %%
-%% @spec print_torrent(PID) -> ok
+%% @spec start_download(PID) -> ok
 %% @end
 %%--------------------------------------------------------------------
 start_download(PID) ->
     gen_server:cast(PID, start_download).
+
+%%--------------------------------------------------------------------
+%% @doc
+%% stop download
+%%
+%% @spec start_download(PID) -> ok
+%% @end
+%%--------------------------------------------------------------------
+stop_download(PID) ->
+    gen_server:cast(PID, stop_download).
 
 %%%===================================================================
 %%% gen_server callbacks
@@ -94,8 +104,8 @@ start_download(PID) ->
 %%                     {stop, Reason}
 %% @end
 %%--------------------------------------------------------------------
-init([]) ->
-    {ok, #state{torrent = #torrent{}}}.
+init([PIDPref]) ->
+    {ok, #state{torrent = #torrent{}, pid_pref = PIDPref}}.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -138,6 +148,15 @@ handle_call(_Request, _From, State) ->
 %% @end
 %%--------------------------------------------------------------------
 handle_cast(start_download, State) ->
+    NewState = case start_down(State) of
+                   {ok, PID} ->
+                       State#state{pid_tracker_client = PID};
+                   _ ->
+                       State
+               end,
+
+    {noreply, NewState};
+handle_cast(stop_download, State) ->
     {noreply, State};
 handle_cast(stop, State) ->
     {stop, normal, State};
@@ -192,7 +211,9 @@ print_torrent_info(Torrent) ->
     print_comment(Torrent#torrent.comment),
     print_created_by(Torrent#torrent.created_by),
     print_encoding(Torrent#torrent.encoding),
-    print_info(Torrent#torrent.info).
+    print_info(Torrent#torrent.info),
+
+    io:format("~n").
 
 print_announce(Announce) when is_list(Announce) ->
     io:format("announce: ~s~n", [Announce]);
@@ -312,3 +333,20 @@ print_md5sum_in_files(MD5) when is_binary(MD5) ->
     io:format("            md5sum: ~p~n", [MD5]);
 print_md5sum_in_files(_) ->
     ok.
+
+start_down(State) ->
+    Torrent = State#state.torrent,
+    {ok, PeerID}  = ebt_pref:get_peer_id(State#state.pid_pref),
+    {ok, Port}    = ebt_pref:get_port(State#state.pid_pref),
+
+    case ebt_tracker_client:start_link(Torrent#torrent.announce,
+                                       State#state.info_hash,
+                                       PeerID,
+                                       Port,
+                                       0) of
+        {ok, PID} ->
+            ebt_tracker_client:get_peers(PID),
+            {ok, PID};
+        _ ->
+            error
+    end.

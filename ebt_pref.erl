@@ -11,17 +11,20 @@
 -behaviour(gen_server).
 
 %% API
--export([start_link/0]).
+-export([start_link/0, stop/1]).
 
--export([init/0, get_peer_id/0, print/0]).
+-export([init_prefs/1, print/1]).
+-export([get_peer_id/1, get_port/1]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
          terminate/2, code_change/3]).
 
--define(SERVER, ?MODULE). 
+-define(SERVER, ?MODULE).
 
--record(state, {peer_id}).
+-record(state, {peer_id,
+                port = 6881
+               }).
 
 %%%===================================================================
 %%% API
@@ -35,37 +38,57 @@
 %% @end
 %%--------------------------------------------------------------------
 start_link() ->
-    gen_server:start_link({local, ?SERVER}, ?MODULE, [], []).
+    gen_server:start_link(?MODULE, [], []).
+
+%%--------------------------------------------------------------------
+%% @doc
+%% stop the process
+%%
+%% @spec stop(PID) -> ok
+%% @end
+%%--------------------------------------------------------------------
+stop(PID) ->
+    gen_server:cast(PID, stop).
 
 %%--------------------------------------------------------------------
 %% @doc
 %% Initialize
 %%
-%% @spec init_pref() -> ok | {error, Error}
+%% @spec init_pref(PID) -> ok | {error, Error}
 %% @end
 %%--------------------------------------------------------------------
-init() ->
-    gen_server:call(?SERVER, init).
+init_prefs(PID) ->
+    gen_server:call(PID, init).
 
 %%--------------------------------------------------------------------
 %% @doc
 %% get the id of peer
 %%
-%% @spec get_peer_id() -> {ok, ID}
+%% @spec get_peer_id(PID) -> {ok, ID}
 %% @end
 %%--------------------------------------------------------------------
-get_peer_id() ->
-    gen_server:call(?SERVER, get_peer_id).
+get_peer_id(PID) ->
+    gen_server:call(PID, get_peer_id).
+
+%%--------------------------------------------------------------------
+%% @doc
+%% get the id of peer
+%%
+%% @spec get_port(PID) -> {ok, Port}
+%% @end
+%%--------------------------------------------------------------------
+get_port(PID) ->
+    gen_server:call(PID, get_port).
 
 %%--------------------------------------------------------------------
 %% @doc
 %% Initialize
 %%
-%% @spec print() -> ok
+%% @spec print(PID) -> ok
 %% @end
 %%--------------------------------------------------------------------
-print() ->
-    gen_server:call(?SERVER, print).
+print(PID) ->
+    gen_server:call(PID, print).
 
 %%%===================================================================
 %%% gen_server callbacks
@@ -106,6 +129,9 @@ handle_call(init, _From, _State) ->
 handle_call(get_peer_id, _From, State) ->
     Reply = {ok, State#state.peer_id},
     {reply, Reply, State};    
+handle_call(get_port, _From, State) ->
+    Reply = {ok, State#state.port},
+    {reply, Reply, State};
 handle_call(print, _From, State) ->
     print_pref(State),
     Reply = ok,
@@ -124,6 +150,8 @@ handle_call(_Request, _From, State) ->
 %%                                  {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
+handle_cast(stop, State) ->
+    {stop, normal, State};
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
