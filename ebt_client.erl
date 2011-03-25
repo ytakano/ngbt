@@ -13,6 +13,7 @@
 %% API
 -export([start_link/0, stop/1]).
 -export([read_torrent/2, print_torrent/1]).
+-export([start_download/1]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
@@ -67,6 +68,16 @@ read_torrent(PID, File) ->
 %%--------------------------------------------------------------------
 print_torrent(PID) ->
     gen_server:call(PID, print_torrent).
+
+%%--------------------------------------------------------------------
+%% @doc
+%% start download
+%%
+%% @spec print_torrent(PID) -> ok
+%% @end
+%%--------------------------------------------------------------------
+start_download(PID) ->
+    gen_server:cast(PID, start_download).
 
 %%%===================================================================
 %%% gen_server callbacks
@@ -126,6 +137,8 @@ handle_call(_Request, _From, State) ->
 %%                                  {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
+handle_cast(start_download, State) ->
+    {noreply, State};
 handle_cast(stop, State) ->
     {stop, normal, State};
 handle_cast(_Msg, State) ->
