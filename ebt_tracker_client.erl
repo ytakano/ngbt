@@ -27,7 +27,7 @@
                 uploaded   = 0,
                 downloaded = 0,
                 left,
-                compact    = 0,
+                compact    = 1,
                 event,     %% optional
                 ip,        %% optional
                 numwant,   %% optional
@@ -181,13 +181,14 @@ code_change(_OldVsn, State, _Extra) ->
 %%% Internal functions
 %%%===================================================================
 gen_info_hash(InfoHash) ->
-    "info_hash=" ++ ebt_lib:escape_uri(binary_to_list(InfoHash)).
+    io:format("info_hash = ~s~n", [ebt_lib:bin_to_hexstr(InfoHash)]),
+    "info_hash=" ++ ebt_lib:escape_uri(InfoHash).
 
 gen_peer_id(PeerID) ->
-    "peer_id=" ++ ebt_lib:escape_uri(PeerID).
+    "&peer_id=" ++ ebt_lib:escape_uri(PeerID).
 
 gen_port(Port) ->
-    "port=" ++ integer_to_list(Port).
+    "&port=" ++ integer_to_list(Port).
 
 gen_uploaded(Bytes) ->
     "&uploaded=" ++ integer_to_list(Bytes).
@@ -197,6 +198,9 @@ gen_downloaded(Bytes) ->
 
 gen_left(Bytes) ->
     "&left=" ++ integer_to_list(Bytes).
+
+gen_compact(Compact) ->
+    "&compact=" ++ integer_to_list(Compact).
 
 gen_event(Event) when Event =:= undefined ->
     "&event=started";
@@ -229,18 +233,22 @@ gen_trackerid(TrackerID) when is_list(TrackerID) ->
 gen_trackerid(_) ->
     "".
 
+gen_url(State) ->
+    lists:flatten([State#state.tracker, "?",
+                   gen_info_hash(State#state.info_hash),
+                   gen_peer_id(State#state.peer_id),
+                   gen_port(State#state.port),
+                   gen_uploaded(State#state.uploaded),
+                   gen_downloaded(State#state.downloaded),
+                   gen_left(State#state.left),
+                   gen_compact(State#state.compact),
+                   gen_event(State#state.event),
+                   gen_ip(State#state.ip),
+                   gen_numwant(State#state.numwant),
+                   gen_key(State#state.key),
+                   gen_trackerid(State#state.trackerid)]).
+
 peers_from_tracker(Ref, From, PID, State) ->
-    URL = [State#state.tracker, "?",
-           gen_info_hash(State#state.info_hash),
-           gen_peer_id(State#state.peer_id),
-           gen_port(State#state.port),
-           gen_uploaded(State#state.uploaded),
-           gen_downloaded(State#state.downloaded),
-           gen_left(State#state.left),
-           gen_event(State#state.event),
-           gen_ip(State#state.ip),
-           gen_numwant(State#state.numwant),
-           gen_key(State#state.key),
-           gen_trackerid(State#state.trackerid)],
+    URL = gen_url(State),
 
     io:format("URL = ~s~n", [URL]).

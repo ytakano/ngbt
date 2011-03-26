@@ -202,15 +202,13 @@ initialize() ->
 
 gen_peer_id() ->
     RND = crypto:rand_bytes(12),
-    binary_to_list(<<<<"-ET0001-">>/binary, RND/binary>>).
+    <<<<"-ET0001-">>/binary, RND/binary>>.
 
 print_pref(State) ->
-    case is_list(State#state.peer_id) of
+    case is_binary(State#state.peer_id) of
         true ->
-            io:format("peer_id: "),
-            lists:map(fun(X) -> io:format("~2.16.0B", [X]) end,
-                      State#state.peer_id),
-            io:format("~n");
+            io:format("peer_id: ~s~n",
+                      [ebt_lib:bin_to_hexstr(State#state.peer_id)]);
         _ ->
             io:format("peer_id: unknown~n")
     end.

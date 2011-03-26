@@ -66,7 +66,7 @@ dec_dict(Data, Acc, N) ->
     case Key of
         <<"info">> ->
             put(info_begin, N1),
-            put(info_len, N2 - N1 - 1);
+            put(info_len, N2 - N1);
         _ ->
             ok
     end,
