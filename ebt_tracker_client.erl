@@ -11,7 +11,7 @@
 -behaviour(gen_server).
 
 %% API
--export([start_link/5]).
+-export([start_link/5, stop/1]).
 -export([get_peers/1, set_event/2]).
 
 %% gen_server callbacks
@@ -49,6 +49,16 @@
 %%--------------------------------------------------------------------
 start_link(Tracker, InfoHash, PeerID, Port, Left) ->
     gen_server:start_link(?MODULE, [Tracker, InfoHash, PeerID, Port, Left], []).
+
+%%--------------------------------------------------------------------
+%% @doc
+%% stop the process
+%%
+%% @spec stop(PID) -> ok
+%% @end
+%%--------------------------------------------------------------------
+stop(PID) ->
+    gen_server:cast(PID, stop).
 
 %%--------------------------------------------------------------------
 %% @doc
@@ -92,7 +102,6 @@ set_event(PID, Event) ->
 %% @end
 %%--------------------------------------------------------------------
 init([Tracker, InfoHash, PeerID, Port, Left]) ->
-    process_flag(trap_exit, true),
     {ok, #state{tracker   = Tracker,
                 info_hash = InfoHash,
                 peer_id   = PeerID,
@@ -113,9 +122,9 @@ init([Tracker, InfoHash, PeerID, Port, Left]) ->
 %%                                   {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
-handle_call({get_peers, Ref}, From, State) ->
+handle_call({get_peers, Ref}, {FromPID, _}, State) ->
     PID = self(),
-    spawn_link(fun() -> peers_from_tracker(Ref, From, PID, State) end),
+    spawn_link(fun() -> peers_from_tracker(Ref, FromPID, PID, State) end),
     Reply = ok,
     {reply, Reply, State};
 handle_call(_Request, _From, State) ->
@@ -134,6 +143,17 @@ handle_call(_Request, _From, State) ->
 %%--------------------------------------------------------------------
 handle_cast({set_event, Event}, State) ->
     {noreply, State#state{event = Event}};
+handle_cast(stop, State) ->
+    case State#state.event of
+        stopped ->
+            ok;
+        undefined ->
+            ok;
+        _ ->
+            peers_from_tracker(make_ref(), self(), self(),
+                               State#state{event = stopped})
+    end,
+    {stop, normal, State};
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
@@ -161,8 +181,6 @@ handle_info(_Info, State) ->
 %% @spec terminate(Reason, State) -> void()
 %% @end
 %%--------------------------------------------------------------------
-terminate(shutdown, _State) ->
-    ok;
 terminate(_Reason, _State) ->
     ok.
 
@@ -181,7 +199,6 @@ code_change(_OldVsn, State, _Extra) ->
 %%% Internal functions
 %%%===================================================================
 gen_info_hash(InfoHash) ->
-    io:format("info_hash = ~s~n", [ebt_lib:bin_to_hexstr(InfoHash)]),
     "info_hash=" ++ ebt_lib:escape_uri(InfoHash).
 
 gen_peer_id(PeerID) ->
@@ -251,4 +268,23 @@ gen_url(State) ->
 peers_from_tracker(Ref, From, PID, State) ->
     URL = gen_url(State),
 
-    io:format("URL = ~s~n", [URL]).
+    io:format("URL = ~s~n", [URL]),
+
+    case httpc:request(URL) of
+        {ok, {Status, _, Body}} ->
+            send_result(Ref, From, Status, Body);
+        _ ->
+            send_result(Ref, From, error, "error")
+    end,
+
+    case State#state.event of
+        undefined ->
+            catch set_event(PID, started);
+        _ ->
+            ok
+    end.
+
+send_result(Ref, From, {_, 200, "OK"}, Body) ->
+    catch From ! {peers, Ref, ok, Body};
+send_result(Ref, From, _, Body) ->
+    catch From ! {peers, Ref, error, Body}.

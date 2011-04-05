@@ -23,7 +23,11 @@
 
 -include("ebt_torrent.hrl").
 
--record(state, {torrent, info_hash, pid_pref, pid_tracker_client}).
+-record(state, {torrent,
+                info_hash,
+                trackers = [],
+                pid_pref,
+                pid_tracker_client}).
 
 %%%===================================================================
 %%% API
@@ -128,7 +132,13 @@ handle_call({read_torrent, File}, _From, State) ->
                                  {error, Reason} ->
                                      {{error, Reason}, State#state.torrent}
                              end,
-    {reply, Reply, State#state{torrent = Torrent, info_hash = Hash}};
+
+    Trackers = make_trackers(Torrent#torrent.announce,
+                             Torrent#torrent.announce_list,
+                             [Torrent#torrent.announce]),
+
+    {reply, Reply, State#state{torrent = Torrent, info_hash = Hash,
+                               trackers = Trackers}};
 handle_call(print_torrent, _From, State) ->
     print_torrent_info(State#state.torrent),
     Reply = ok,
@@ -149,16 +159,18 @@ handle_call(_Request, _From, State) ->
 %%--------------------------------------------------------------------
 handle_cast(start_download, State) ->
     NewState = case start_down(State) of
-                   {ok, PID} ->
+                   {ok, PID} when is_pid(PID) ->
                        State#state{pid_tracker_client = PID};
-                   _ ->
+                   {error, _} ->
                        State
                end,
 
     {noreply, NewState};
 handle_cast(stop_download, State) ->
-    {noreply, State};
+    stop_down(State),
+    {noreply, State#state{pid_tracker_client = undefined}};
 handle_cast(stop, State) ->
+    ebt_tracker_client:stop(State#state.pid_tracker_client),
     {stop, normal, State};
 handle_cast(_Msg, State) ->
     {noreply, State}.
@@ -173,6 +185,22 @@ handle_cast(_Msg, State) ->
 %%                                   {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
+handle_info({peers, _, ok, Body}, State) ->
+    io:format("peers: ~p~n", [Body]),
+
+    case ebt_bencode:decode(list_to_binary(Body)) of
+        {ok, Res} ->
+            io:format("Res: ~p~n", [Res]),
+            {noreply, State};
+        _ ->
+            ebt_tracker_client:stop(State#state.pid_tracker_client),
+            NewState = retry_down(State),
+            {noreply, NewState}
+    end;
+handle_info({peers, _, error, _}, State) ->
+    ebt_tracker_client:stop(State#state.pid_tracker_client),
+    NewState = retry_down(State),
+    {noreply, NewState};
 handle_info(_Info, State) ->
     {noreply, State}.
 
@@ -334,19 +362,57 @@ print_md5sum_in_files(MD5) when is_binary(MD5) ->
 print_md5sum_in_files(_) ->
     ok.
 
-start_down(State) ->
-    Torrent = State#state.torrent,
+start_down(State) when length(State#state.trackers) > 0 ->
     {ok, PeerID}  = ebt_pref:get_peer_id(State#state.pid_pref),
     {ok, Port}    = ebt_pref:get_port(State#state.pid_pref),
 
-    case ebt_tracker_client:start_link(Torrent#torrent.announce,
+    [Tracker | _] = State#state.trackers,
+
+    case ebt_tracker_client:start_link(Tracker,
                                        State#state.info_hash,
                                        PeerID,
                                        Port,
                                        0) of
         {ok, PID} ->
-            ebt_tracker_client:get_peers(PID),
-            {ok, PID};
-        _ ->
-            error
-    end.
+            case ebt_tracker_client:get_peers(PID) of
+                {ok, _} ->
+                    {ok, PID}
+            end
+    end;
+start_down(State) ->
+    {ok, State#state.pid_tracker_client}.
+
+stop_down(State) when is_pid(State#state.pid_tracker_client) ->
+    PID = State#state.pid_tracker_client,
+
+    ebt_tracker_client:set_event(PID, stopped),
+    ebt_tracker_client:get_peers(PID),
+    ebt_tracker_client:stop(PID);
+stop_down(_) ->
+    ok.
+
+make_trackers(Announce, [H | T], Trackers) ->
+    make_trackers(Announce, T, make_trackers2(Announce, H, Trackers));
+make_trackers(_, [], Trackers) ->
+    lists:reverse(Trackers).
+
+make_trackers2(Announce, [H | T], Trackers) when H =/= Announce->
+    make_trackers2(Announce, T, [H | Trackers]);
+make_trackers2(Announce, [_ | T], Trackers) ->
+    make_trackers2(Announce, T, Trackers);
+make_trackers2(_, [], Trackers) ->
+    Trackers.
+
+retry_down(State) when length(State#state.trackers) > 0 ->
+    [H | T] = State#state.trackers,
+
+    Trackers = lists:reverse([H | lists:reverse(T)]),
+
+    case start_down(State#state{trackers = Trackers,
+                                pid_tracker_client = undefined}) of
+        {ok, PID} ->
+            State#state{trackers = Trackers, pid_tracker_client = PID}
+    end;
+retry_down(State) ->
+    State.
+

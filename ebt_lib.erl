@@ -1,6 +1,6 @@
 -module(ebt_lib).
 
--export([bin_to_hexstr/1, escape_uri/1]).
+-export([bin_to_hexstr/1, escape_uri/1, sleep/1]).
 
 bin_to_hexstr(Bin) ->
     lists:flatten([io_lib:format("~2.16.0B", [X]) || X <- binary_to_list(Bin)]).
@@ -27,3 +27,9 @@ escape_uri([H|T]) ->
     end;
 escape_uri([]) ->
 []. 
+
+sleep(MSec) ->
+    receive
+    after MSec ->
+            ok
+    end.
