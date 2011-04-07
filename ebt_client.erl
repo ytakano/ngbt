@@ -25,7 +25,13 @@
 
 -record(state, {torrent,
                 info_hash,
-                trackers = [],
+                stat         = waiting,  % waiting, downloding
+                trackers     = [],
+                interval     = 300,
+                min_interval = 300,
+                complete     = 0,
+                incomplete   = 0,
+                peers,
                 pid_pref,
                 pid_tracker_client}).
 
@@ -109,7 +115,7 @@ stop_download(PID) ->
 %% @end
 %%--------------------------------------------------------------------
 init([PIDPref]) ->
-    {ok, #state{torrent = #torrent{}, pid_pref = PIDPref}}.
+    {ok, #state{torrent = #torrent{}, pid_pref = PIDPref, peers = dict:new()}}.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -157,18 +163,20 @@ handle_call(_Request, _From, State) ->
 %%                                  {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
-handle_cast(start_download, State) ->
+handle_cast(start_download, State) when State#state.stat =:= waiting ->
     NewState = case start_down(State) of
                    {ok, PID} when is_pid(PID) ->
-                       State#state{pid_tracker_client = PID};
+                       State#state{pid_tracker_client = PID,
+                                   stat = downloading};
                    {error, _} ->
                        State
                end,
 
     {noreply, NewState};
-handle_cast(stop_download, State) ->
+handle_cast(stop_download, State) when State#state.stat =:= downloading ->
     stop_down(State),
-    {noreply, State#state{pid_tracker_client = undefined}};
+    {noreply, State#state{pid_tracker_client = undefined,
+                          stat = waiting}};
 handle_cast(stop, State) ->
     ebt_tracker_client:stop(State#state.pid_tracker_client),
     {stop, normal, State};
@@ -185,19 +193,21 @@ handle_cast(_Msg, State) ->
 %%                                   {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
-handle_info({peers, _, ok, Body}, State) ->
-    io:format("peers: ~p~n", [Body]),
+handle_info({peers, _, ok, Body}, State)
+  when State#state.stat =:= downloading ->
+    case ebt_bencode:decode(Body) of
+        {ok, {dict, Res}} ->
+            io:format("tracker responce:~n"),
+            NewState = tracker_res_handler(Res, State),
 
-    case ebt_bencode:decode(list_to_binary(Body)) of
-        {ok, Res} ->
-            io:format("Res: ~p~n", [Res]),
-            {noreply, State};
+            {noreply, NewState};
         _ ->
             ebt_tracker_client:stop(State#state.pid_tracker_client),
             NewState = retry_down(State),
             {noreply, NewState}
     end;
-handle_info({peers, _, error, _}, State) ->
+handle_info({peers, _, error, _}, State)
+  when State#state.stat =:= downloading ->
     ebt_tracker_client:stop(State#state.pid_tracker_client),
     NewState = retry_down(State),
     {noreply, NewState};
@@ -416,3 +426,91 @@ retry_down(State) when length(State#state.trackers) > 0 ->
 retry_down(State) ->
     State.
 
+tracker_res_handler(Res, State) ->
+    tracker_res_failure(Res, State).
+
+tracker_res_failure(Res, State) ->
+    case dict:find(<<"failure reason">>, Res) of
+        {ok, Value} when is_binary(Value) ->
+            io:format("    failure reason = ~s~n", [Value]),
+
+            ebt_tracker_client:stop(State#state.pid_tracker_client),
+            retry_down(State);
+        _ ->
+            tracker_res_warning(Res, State)
+    end.
+
+tracker_res_warning(Res, State) ->
+    case dict:find(<<"warning massage">>, Res) of
+        {ok, Value} when is_binary(Value) ->
+            io:format("    warning message = ~s~n", [Value]);
+        _ ->
+            ok
+    end,
+
+    tracker_res_interval(Res, State).
+
+tracker_res_interval(Res, State) ->
+    case dict:find(<<"interval">>, Res) of
+        {ok, Value} when is_integer(Value) ->
+            io:format("    interval = ~p~n", [Value]),
+            tracker_res_min_interval(Res, State#state{interval = Value});
+        _ ->
+            tracker_res_min_interval(Res, State)
+    end.
+
+tracker_res_min_interval(Res, State) ->
+    case dict:find(<<"min interval">>, Res) of
+        {ok, Value} when is_integer(Value) ->
+            io:format("    min interval = ~p~n", [Value]),
+            tracker_res_tracker_id(Res, State#state{min_interval = Value});
+        _ ->
+            tracker_res_tracker_id(Res, State)
+    end.
+
+tracker_res_tracker_id(Res, State) ->
+    case dict:find(<<"tracker id">>, Res) of
+        {ok, Value} when is_binary(Value) ->
+            io:format("    tracker id = ~p~n", [Value]),
+            ebt_tracker_client:set_tracker_id(State#state.pid_tracker_client,
+                                              Value);
+        _ ->
+            ok
+    end,
+
+    tracker_res_complete(Res, State).
+
+tracker_res_complete(Res, State) ->
+    case dict:find(<<"complete">>, Res) of
+        {ok, Value} when is_integer(Value) ->
+            io:format("    complete = ~p~n", [Value]),
+            tracker_res_incomplete(Res, State#state{complete = Value});
+        _ ->
+            tracker_res_incomplete(Res, State)
+    end.
+
+tracker_res_incomplete(Res, State) ->
+    case dict:find(<<"incomplete">>, Res) of
+        {ok, Value} when is_integer(Value) ->
+            io:format("    incomplete = ~p~n", [Value]),
+            tracker_res_peers(Res, State#state{incomplete = Value});
+        _ ->
+            tracker_res_peers(Res, State)
+    end.
+
+tracker_res_peers(Res, State) ->
+    case dict:find(<<"peers">>, Res) of
+        {ok, Value} when is_binary(Value) ->
+            tracker_res_peer(Value, State);
+        _ ->
+            State
+    end.
+
+tracker_res_peer(<<IP1:8, IP2:8, IP3:8, IP4:8, Port:16/integer-big-unsigned,
+                   Peers/binary>>, State) ->
+    io:format("    IP = ~p, Port = ~p~n", [{IP1, IP2, IP3, IP4}, Port]),
+    NewPeers = dict:append({{IP1, IP2, IP3, IP4}, Port}, undefined,
+                           State#state.peers),
+    tracker_res_peer(Peers, State#state{peers =  NewPeers});
+tracker_res_peer(_, State) ->
+    State.

@@ -12,7 +12,7 @@
 
 %% API
 -export([start_link/5, stop/1]).
--export([get_peers/1, set_event/2]).
+-export([get_peers/1, set_event/2, set_tracker_id/2]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
@@ -80,11 +80,21 @@ get_peers(PID) ->
 %% @doc
 %% set event
 %%
-%% @spec set event(PID, Event) -> ok
+%% @spec set_event(PID, Event) -> ok
 %% @end
 %%--------------------------------------------------------------------
 set_event(PID, Event) ->
     gen_server:cast(PID, {set_event, Event}).
+
+%%--------------------------------------------------------------------
+%% @doc
+%% set event
+%%
+%% @spec set_tracker_id(PID, ID) -> ok
+%% @end
+%%--------------------------------------------------------------------
+set_tracker_id(PID, ID) ->
+    gen_server:cast(PID, {set_tracker_id, ID}).
 
 %%%===================================================================
 %%% gen_server callbacks
@@ -141,6 +151,8 @@ handle_call(_Request, _From, State) ->
 %%                                  {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
+handle_cast({set_tracker_id, ID}, State) when is_binary(ID) ->
+    {noreply, State#state{trackerid = binary_to_list(ID)}};
 handle_cast({set_event, Event}, State) ->
     {noreply, State#state{event = Event}};
 handle_cast(stop, State) ->
@@ -246,7 +258,7 @@ gen_key(_) ->
     "".
 
 gen_trackerid(TrackerID) when is_list(TrackerID) ->
-    "&trackerid" ++ ebt_lib:escape_uri(TrackerID);
+    "&trackerid=" ++ ebt_lib:escape_uri(TrackerID);
 gen_trackerid(_) ->
     "".
 
@@ -285,6 +297,6 @@ peers_from_tracker(Ref, From, PID, State) ->
     end.
 
 send_result(Ref, From, {_, 200, "OK"}, Body) ->
-    catch From ! {peers, Ref, ok, Body};
+    catch From ! {peers, Ref, ok, list_to_binary(Body)};
 send_result(Ref, From, _, Body) ->
-    catch From ! {peers, Ref, error, Body}.
+    catch From ! {peers, Ref, error, list_to_binary(Body)}.
