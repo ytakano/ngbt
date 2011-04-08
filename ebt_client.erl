@@ -33,7 +33,8 @@
                 incomplete   = 0,
                 peers,
                 pid_pref,
-                pid_tracker_client}).
+                pid_tracker_client,
+                pid_files}).
 
 %%%===================================================================
 %%% API
@@ -136,15 +137,33 @@ handle_call({read_torrent, File}, _From, State) ->
                                  {ok, Data, SHA1} ->
                                      {ok, Data, SHA1};
                                  {error, Reason} ->
-                                     {{error, Reason}, State#state.torrent}
+                                     {{error, Reason}, State#state.torrent,
+                                      undefined}
                              end,
 
-    Trackers = make_trackers(Torrent#torrent.announce,
-                             Torrent#torrent.announce_list,
-                             [Torrent#torrent.announce]),
+    Trackers = case Reply of
+                   ok ->
+                       make_trackers(Torrent#torrent.announce,
+                                     Torrent#torrent.announce_list,
+                                     [Torrent#torrent.announce]);
+                   _ ->
+                       State#state.trackers
+               end,
+
+    PIDFiles = case Reply of
+                   ok ->
+                       case ebt_files:start_link(Torrent#torrent.info) of
+                           {ok, P} ->
+                               P;
+                           _ ->
+                               State#state.pid_files
+                       end;
+                   _ ->
+                       State#state.pid_files
+               end,
 
     {reply, Reply, State#state{torrent = Torrent, info_hash = Hash,
-                               trackers = Trackers}};
+                               trackers = Trackers, pid_files = PIDFiles}};
 handle_call(print_torrent, _From, State) ->
     print_torrent_info(State#state.torrent),
     Reply = ok,
@@ -179,6 +198,7 @@ handle_cast(stop_download, State) when State#state.stat =:= downloading ->
                           stat = waiting}};
 handle_cast(stop, State) ->
     ebt_tracker_client:stop(State#state.pid_tracker_client),
+    ebt_files:stop(State#state.pid_files),
     {stop, normal, State};
 handle_cast(_Msg, State) ->
     {noreply, State}.
@@ -199,6 +219,9 @@ handle_info({peers, _, ok, Body}, State)
         {ok, {dict, Res}} ->
             io:format("tracker responce:~n"),
             NewState = tracker_res_handler(Res, State),
+
+            %% TODO: contact to peers
+            %%       start timer for announce
 
             {noreply, NewState};
         _ ->
