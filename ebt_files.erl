@@ -17,11 +17,13 @@
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
          terminate/2, code_change/3]).
 
--define(SERVER, ?MODULE). 
+-define(SERVER, ?MODULE).
 
 -include("ebt_torrent.hrl").
 
--record(state, {hashes, files = []}).
+-record(file, {length, md5sum, is_completed, device}).
+
+-record(state, {hashes, paths = [], files}).
 
 %%%===================================================================
 %%% API
@@ -63,11 +65,13 @@ stop(PID) ->
 %% @end
 %%--------------------------------------------------------------------
 init([Info]) ->
-    Files = gen_files(Info),
+    {Paths, Files} = gen_paths_and_files(Info),
 
-    io:format("Files = ~p~n", [Files]),
+    io:format("Paths = ~p~n", [Paths]),
 
-    {ok, #state{hashes = Info#torrent_info.pieces, files = Files}}.
+    {ok, #state{hashes = Info#torrent_info.pieces,
+                paths  = Paths,
+                files  = Files}}.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -143,18 +147,31 @@ code_change(_OldVsn, State, _Extra) ->
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
-gen_files(Info) when not is_list(Info#torrent_info.files) ->
-    [binary_to_list(Info#torrent_info.name)];
-gen_files(Info) when is_binary(Info#torrent_info.name) and
-                     is_list(Info#torrent_info.files) ->
-    gen_files(binary_to_list(Info#torrent_info.name),
-              Info#torrent_info.files,
-              []);
-gen_files(_) ->
+gen_paths_and_files(Info) when not is_list(Info#torrent_info.files) ->
+    Path = binary_to_list(Info#torrent_info.name),
+
+    File = #file{length = Info#torrent_info.length,
+                 md5sum = Info#torrent_info.md5sum},
+
+    Files = dict:append(Path, File, dict:new()),
+
+    {[Path], Files};
+gen_paths_and_files(Info) when is_binary(Info#torrent_info.name) and
+                               is_list(Info#torrent_info.files) ->
+    gen_paths_and_files(binary_to_list(Info#torrent_info.name),
+                        Info#torrent_info.files, [], dict:new());
+gen_paths_and_files(_) ->
     [].
 
-gen_files(Dir, [H | T], Result) ->
-    Path = [binary_to_list(N) || N <- H#torrent_file.path, is_binary(N)],
-    gen_files(Dir, T, [filename:join([Dir | Path]) | Result]);
-gen_files(_, [], Result) ->
-    lists:reverse(Result).
+gen_paths_and_files(Dir, [H | T], Paths, Files) ->
+    P = [binary_to_list(N) || N <- H#torrent_file.path, is_binary(N)],
+    Path = filename:join([Dir | P]),
+
+    File = #file{length = H#torrent_file.length,
+                 md5sum = H#torrent_file.md5sum},
+
+    NewFiles = dict:append(Path, File, Files),
+
+    gen_paths_and_files(Dir, T, [Path | Paths], NewFiles);
+gen_paths_and_files(_, [], Paths, Files) ->
+    {lists:reverse(Paths), Files}.
