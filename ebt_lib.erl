@@ -1,6 +1,6 @@
 -module(ebt_lib).
 
--export([bin_to_hexstr/1, escape_uri/1, sleep/1]).
+-export([bin_to_hexstr/1, escape_uri/1, sleep/1, ceil/1]).
 
 bin_to_hexstr(Bin) ->
     lists:flatten([io_lib:format("~2.16.0B", [X]) || X <- binary_to_list(Bin)]).
@@ -32,4 +32,13 @@ sleep(MSec) ->
     receive
     after MSec ->
             ok
+    end.
+
+ceil(X) when X < 0 ->
+    trunc(X);
+ceil(X) ->
+    T = trunc(X),
+    case X - T == 0 of
+        true -> T;
+        false -> T + 1
     end.

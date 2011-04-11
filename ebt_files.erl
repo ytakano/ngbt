@@ -1,10 +1,10 @@
 %%%-------------------------------------------------------------------
-%%% @author ytakano <ytakano@dp117-119.jaist.ac.jp>
-%%% @copyright (C) 2011, ytakano
+%%% @author ytakano <ytakanoster@gmail.com>
+%%% @copyright (C) 2011, Yuuki Takano
 %%% @doc
 %%%
 %%% @end
-%%% Created :  8 Apr 2011 by ytakano <ytakano@dp117-119.jaist.ac.jp>
+%%% Created :  8 Apr 2011 by Yuuki Takano <ytakanoster@gmail.com>
 %%%-------------------------------------------------------------------
 -module(ebt_files).
 
@@ -21,9 +21,9 @@
 
 -include("ebt_torrent.hrl").
 
--record(file, {length, md5sum, is_completed, device}).
+-record(file, {length, md5sum, is_completed}).
 
--record(state, {hashes, paths = [], files}).
+-record(state, {piece_length, hashes, paths = [], files}).
 
 %%%===================================================================
 %%% API
@@ -38,6 +38,16 @@
 %%--------------------------------------------------------------------
 start_link(Info) ->
     gen_server:start_link(?MODULE, [Info], []).
+
+%%--------------------------------------------------------------------
+%% @doc
+%% initialize
+%%
+%% @spec init_files(PID) -> ok
+%% @end
+%%--------------------------------------------------------------------
+init_files(PID, Info) ->
+    gen_server:cast(PID, {init_files, Info}).
 
 %%--------------------------------------------------------------------
 %% @doc
@@ -65,13 +75,9 @@ stop(PID) ->
 %% @end
 %%--------------------------------------------------------------------
 init([Info]) ->
-    {Paths, Files} = gen_paths_and_files(Info),
-
-    io:format("Paths = ~p~n", [Paths]),
-
-    {ok, #state{hashes = Info#torrent_info.pieces,
-                paths  = Paths,
-                files  = Files}}.
+    PID = self(),
+    spawn_link(fun() -> init_files(PID, Info) end),
+    {ok, #state{}}.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -101,6 +107,20 @@ handle_call(_Request, _From, State) ->
 %%                                  {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
+handle_cast({init_files, Info}, State) ->
+    {Paths, Files} = gen_paths_and_files(Info),
+
+    io:format("Paths = ~p~n", [Paths]),
+
+    NewFiles = check_files(Paths,
+                           Info#torrent_info.pieces,
+                           Info#torrent_info.piece_length,
+                           Files),
+
+    {stop, normal, State#state{piece_length = Info#torrent_info.piece_length,
+                               hashes       = Info#torrent_info.pieces,
+                               paths        = Paths,
+                               files        = NewFiles}};
 handle_cast(stop, State) ->
     {stop, normal, State};
 handle_cast(_Msg, State) ->
@@ -175,3 +195,49 @@ gen_paths_and_files(Dir, [H | T], Paths, Files) ->
     gen_paths_and_files(Dir, T, [Path | Paths], NewFiles);
 gen_paths_and_files(_, [], Paths, Files) ->
     {lists:reverse(Paths), Files}.
+
+check_file(IoDevice, <<Hash:20/binary, Hashes/binary>>, PieceLen, Location,
+           Files) ->
+    case file:pread(IoDevice, Location, PieceLen) of
+        {ok, Data} ->
+            io:format("    Hash1 = ~p~n", [Hash]),
+            io:format("    Hash2 = ~p~n", [crypto:sha(Data)]),
+            check_file(IoDevice, Hashes, PieceLen, Location + PieceLen, Files);
+        _ ->
+            Files
+    end;
+check_file(_, _, _, _, Files) ->
+    Files.
+
+check_files(Paths, Hashes, PieceLen, Files) ->
+    check_files(Paths, Hashes, PieceLen, 0, Files, crypto:sha_init()).
+
+check_files([H | T], Hashes, PieceLen, Location, Files, Context) ->
+    case dict:find(H, Files) of
+        {ok, File} ->
+            case file:open(H, [read, binary]) of
+                {ok, IoDevice} ->
+                    %% TODO: check file
+                    ok;
+                _ ->
+                    if
+                        File#file.length =< Location ->
+                            TailLen = File#file.length - Location,
+                            HashBytes = 20 * ebt_lib:ceil(TailLen / PieceLen),
+
+                            <<_:HashBytes/binary, NewHashes/binary>> = Hashes,
+
+                            check_files(T, NewHashes, PieceLen,
+                                        PieceLen - TailLen rem PieceLen,
+                                        Files, crypto:sha_init());
+                        true ->
+                            check_files(T, Hashes, PieceLen,
+                                        Location - File#file.length, Files,
+                                        crypto:sha_init())
+                    end
+            end;
+        _ ->
+            ok
+    end;
+check_files([], _, _, _, _, _) ->
+    ok.
