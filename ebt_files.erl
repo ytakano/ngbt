@@ -1,5 +1,5 @@
 %%%-------------------------------------------------------------------
-%%% @author ytakano <ytakanoster@gmail.com>
+%%% @author Yuuki Takano <ytakanoster@gmail.com>
 %%% @copyright (C) 2011, Yuuki Takano
 %%% @doc
 %%%
@@ -196,48 +196,98 @@ gen_paths_and_files(Dir, [H | T], Paths, Files) ->
 gen_paths_and_files(_, [], Paths, Files) ->
     {lists:reverse(Paths), Files}.
 
-check_file(IoDevice, <<Hash:20/binary, Hashes/binary>>, PieceLen, Location,
-           Files) ->
-    case file:pread(IoDevice, Location, PieceLen) of
-        {ok, Data} ->
-            io:format("    Hash1 = ~p~n", [Hash]),
-            io:format("    Hash2 = ~p~n", [crypto:sha(Data)]),
-            check_file(IoDevice, Hashes, PieceLen, Location + PieceLen, Files);
-        _ ->
-            Files
-    end;
-check_file(_, _, _, _, Files) ->
-    Files.
-
 check_files(Paths, Hashes, PieceLen, Files) ->
-    check_files(Paths, Hashes, PieceLen, 0, Files, crypto:sha_init()).
+    check_files(Paths, Hashes, PieceLen, 0, Files, crypto:sha_init(), 0).
 
-check_files([H | T], Hashes, PieceLen, Location, Files, Context) ->
+check_files([H | T], Hashes, PieceLen, Location, Files, Context, Read) ->
+    io:format("Path = ~s:~n", [H]),
+    io:format("Read     = ~p~n", [Read]),
+    io:format("PieceLen = ~p~n", [PieceLen]),
+
     case dict:find(H, Files) of
-        {ok, File} ->
+        {ok, [File | _]} ->
             case file:open(H, [read, binary]) of
                 {ok, IoDevice} ->
-                    %% TODO: check file
-                    ok;
+                    {NewHashes,
+                     NewLocation,
+                     NewContext,
+                     NewRead} = check_file(IoDevice, Hashes, PieceLen,
+                                           Location, File#file.length,
+                                           Context, Read),
+
+                    check_files(T, NewHashes, PieceLen, NewLocation, Files,
+                                NewContext, NewRead);
                 _ ->
                     if
                         File#file.length =< Location ->
-                            TailLen = File#file.length - Location,
-                            HashBytes = 20 * ebt_lib:ceil(TailLen / PieceLen),
+                            TailLen   = File#file.length - Location,
+                            Num       = ebt_lib:ceil(TailLen / PieceLen),
+                            HashBytes = 20 * Num,
 
-                            <<_:HashBytes/binary, NewHashes/binary>> = Hashes,
-
-                            check_files(T, NewHashes, PieceLen,
-                                        PieceLen - TailLen rem PieceLen,
-                                        Files, crypto:sha_init());
+                            case Hashes of
+                                <<_:HashBytes/binary, NewHashes/binary>> ->
+                                    check_files(T, NewHashes, PieceLen,
+                                                PieceLen * Num - TailLen,
+                                                File#file.length,
+                                                crypto:sha_init(), 0);
+                                _ ->
+                                    %% TODO: handle error
+                                    ok
+                            end;
                         true ->
                             check_files(T, Hashes, PieceLen,
-                                        Location - File#file.length, Files,
-                                        crypto:sha_init())
+                                        Location - File#file.length,
+                                        File#file.length, crypto:sha_init(), 0)
                     end
             end;
         _ ->
             ok
     end;
-check_files([], _, _, _, _, _) ->
+check_files([], _, _, _, _, _, _) ->
     ok.
+
+check_file(IoDevice, Hashes = <<Hash:20/binary, NewHashes/binary>>, PieceLen,
+           Location, FileSize, Context, Read) ->
+    case file:pread(IoDevice, Location, PieceLen - Read) of
+        {ok, Data} ->
+            if
+                byte_size(Data) + Read =:= PieceLen ->
+                    Digest = crypto:sha_final(crypto:sha_update(Context, Data)),
+
+                    io:format("    Hash1 = ~p~n", [Hash]),
+                    io:format("    Hash2 = ~p~n", [Digest]),
+
+                    %% TODO: compare Hash and Digest
+
+                    check_file(IoDevice, NewHashes, PieceLen,
+                               Location + PieceLen - Read, FileSize,
+                               crypto:sha_init(), 0);
+                true ->
+                    if
+                        Location + byte_size(Data) =:= FileSize ->
+                            {Hashes, 0, crypto:sha_update(Context, Data),
+                             byte_size(Data) + Read};
+                        true ->
+                            skip_bytes(Hashes, PieceLen, Location, FileSize)
+                    end
+            end;
+        eof ->
+            {Hashes, 0, crypto:sha_init(), 0};
+        _ ->
+            skip_bytes(Hashes, PieceLen, Location, FileSize)
+    end;
+check_file(_, Hashes, PieceLen, Location, FileSize, _, _) ->
+    skip_bytes(Hashes, PieceLen, Location, FileSize).
+
+skip_bytes(Hashes, PieceLen, Location, FileSize) ->
+    Remain = FileSize - Location,
+    Num    = ebt_lib:ceil(Remain / PieceLen),
+    Bytes  = 20 * Num,
+
+    case Hashes of
+        <<_:Bytes/binary, NewHashes/binary>> ->
+            {NewHashes, Num * PieceLen - Remain, crypto:sha_init(), 0};
+        _ ->
+            %% TODO: handle error
+            {<<>>, Num * PieceLen - Remain, crypto:sha_init(), 0}
+    end.
