@@ -6,7 +6,7 @@
 %%% @end
 %%% Created : 22 Mar 2011 by Yuuki Takano <ytakanoster@gmail.com>
 %%%-------------------------------------------------------------------
--module(ebt_client).
+-module(ngbt_client).
 
 -behaviour(gen_server).
 
@@ -21,7 +21,7 @@
 
 -define(SERVER, ?MODULE).
 
--include("ebt_torrent.hrl").
+-include("ngbt_torrent.hrl").
 
 -record(state, {torrent,
                 info_hash,
@@ -133,7 +133,7 @@ init([PIDPref]) ->
 %% @end
 %%--------------------------------------------------------------------
 handle_call({read_torrent, File}, _From, State) ->
-    {Reply, Torrent, Hash} = case ebt_readtorrent:read(File) of
+    {Reply, Torrent, Hash} = case ngbt_readtorrent:read(File) of
                                  {ok, Data, SHA1} ->
                                      {ok, Data, SHA1};
                                  {error, Reason} ->
@@ -152,7 +152,7 @@ handle_call({read_torrent, File}, _From, State) ->
 
     PIDFiles = case Reply of
                    ok ->
-                       case ebt_files:start_link(Torrent#torrent.info) of
+                       case ngbt_files:start_link(Torrent#torrent.info) of
                            {ok, P} ->
                                P;
                            _ ->
@@ -197,8 +197,8 @@ handle_cast(stop_download, State) when State#state.stat =:= downloading ->
     {noreply, State#state{pid_tracker_client = undefined,
                           stat = waiting}};
 handle_cast(stop, State) ->
-    ebt_tracker_client:stop(State#state.pid_tracker_client),
-    ebt_files:stop(State#state.pid_files),
+    ngbt_tracker_client:stop(State#state.pid_tracker_client),
+    ngbt_files:stop(State#state.pid_files),
     {stop, normal, State};
 handle_cast(_Msg, State) ->
     {noreply, State}.
@@ -215,7 +215,7 @@ handle_cast(_Msg, State) ->
 %%--------------------------------------------------------------------
 handle_info({peers, _, ok, Body}, State)
   when State#state.stat =:= downloading ->
-    case ebt_bencode:decode(Body) of
+    case ngbt_bencode:decode(Body) of
         {ok, {dict, Res}} ->
             io:format("tracker responce:~n"),
             NewState = tracker_res_handler(Res, State),
@@ -225,13 +225,13 @@ handle_info({peers, _, ok, Body}, State)
 
             {noreply, NewState};
         _ ->
-            ebt_tracker_client:stop(State#state.pid_tracker_client),
+            ngbt_tracker_client:stop(State#state.pid_tracker_client),
             NewState = retry_down(State),
             {noreply, NewState}
     end;
 handle_info({peers, _, error, _}, State)
   when State#state.stat =:= downloading ->
-    ebt_tracker_client:stop(State#state.pid_tracker_client),
+    ngbt_tracker_client:stop(State#state.pid_tracker_client),
     NewState = retry_down(State),
     {noreply, NewState};
 handle_info(_Info, State) ->
@@ -334,10 +334,10 @@ print_piece_length(_) ->
 
 print_pieces(Pieces) ->
     io:format("    pieces: ~s ~s ~s ~s ...~n",
-              [ebt_lib:bin_to_hexstr(binary:part(Pieces, { 0, 4})),
-               ebt_lib:bin_to_hexstr(binary:part(Pieces, { 4, 4})),
-               ebt_lib:bin_to_hexstr(binary:part(Pieces, { 8, 4})),
-               ebt_lib:bin_to_hexstr(binary:part(Pieces, {12, 4}))]).
+              [ngbt_lib:bin_to_hexstr(binary:part(Pieces, { 0, 4})),
+               ngbt_lib:bin_to_hexstr(binary:part(Pieces, { 4, 4})),
+               ngbt_lib:bin_to_hexstr(binary:part(Pieces, { 8, 4})),
+               ngbt_lib:bin_to_hexstr(binary:part(Pieces, {12, 4}))]).
 
 print_private(IsPrivate) when is_integer(IsPrivate) ->
     io:format("    private: ~p~n", [IsPrivate]);
@@ -396,18 +396,18 @@ print_md5sum_in_files(_) ->
     ok.
 
 start_down(State) when length(State#state.trackers) > 0 ->
-    {ok, PeerID}  = ebt_pref:get_peer_id(State#state.pid_pref),
-    {ok, Port}    = ebt_pref:get_port(State#state.pid_pref),
+    {ok, PeerID}  = ngbt_pref:get_peer_id(State#state.pid_pref),
+    {ok, Port}    = ngbt_pref:get_port(State#state.pid_pref),
 
     [Tracker | _] = State#state.trackers,
 
-    case ebt_tracker_client:start_link(Tracker,
+    case ngbt_tracker_client:start_link(Tracker,
                                        State#state.info_hash,
                                        PeerID,
                                        Port,
                                        0) of
         {ok, PID} ->
-            case ebt_tracker_client:get_peers(PID) of
+            case ngbt_tracker_client:get_peers(PID) of
                 {ok, _} ->
                     {ok, PID}
             end
@@ -418,9 +418,9 @@ start_down(State) ->
 stop_down(State) when is_pid(State#state.pid_tracker_client) ->
     PID = State#state.pid_tracker_client,
 
-    ebt_tracker_client:set_event(PID, stopped),
-    ebt_tracker_client:get_peers(PID),
-    ebt_tracker_client:stop(PID);
+    ngbt_tracker_client:set_event(PID, stopped),
+    ngbt_tracker_client:get_peers(PID),
+    ngbt_tracker_client:stop(PID);
 stop_down(_) ->
     ok.
 
@@ -457,7 +457,7 @@ tracker_res_failure(Res, State) ->
         {ok, Value} when is_binary(Value) ->
             io:format("    failure reason = ~s~n", [Value]),
 
-            ebt_tracker_client:stop(State#state.pid_tracker_client),
+            ngbt_tracker_client:stop(State#state.pid_tracker_client),
             retry_down(State);
         _ ->
             tracker_res_warning(Res, State)
@@ -495,8 +495,8 @@ tracker_res_tracker_id(Res, State) ->
     case dict:find(<<"tracker id">>, Res) of
         {ok, Value} when is_binary(Value) ->
             io:format("    tracker id = ~p~n", [Value]),
-            ebt_tracker_client:set_tracker_id(State#state.pid_tracker_client,
-                                              Value);
+            ngbt_tracker_client:set_tracker_id(State#state.pid_tracker_client,
+                                               Value);
         _ ->
             ok
     end,

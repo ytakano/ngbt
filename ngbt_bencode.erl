@@ -1,4 +1,4 @@
--module(ebt_bencode).
+-module(ngbt_bencode).
 
 %% this code is presented by
 %% http://wiki.theory.org/Decoding_encoding_bencoded_data_with_erlang

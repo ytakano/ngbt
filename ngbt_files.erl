@@ -6,7 +6,7 @@
 %%% @end
 %%% Created :  8 Apr 2011 by Yuuki Takano <ytakanoster@gmail.com>
 %%%-------------------------------------------------------------------
--module(ebt_files).
+-module(ngbt_files).
 
 -behaviour(gen_server).
 
@@ -19,7 +19,7 @@
 
 -define(SERVER, ?MODULE).
 
--include("ebt_torrent.hrl").
+-include("ngbt_torrent.hrl").
 
 -record(file, {length, md5sum, is_completed}).
 
@@ -221,7 +221,7 @@ check_files([H | T], Hashes, PieceLen, Location, Files, Context, Read) ->
                     if
                         File#file.length =< Location ->
                             TailLen   = File#file.length - Location,
-                            Num       = ebt_lib:ceil(TailLen / PieceLen),
+                            Num       = ngbt_lib:ceil(TailLen / PieceLen),
                             HashBytes = 20 * Num,
 
                             case Hashes of
@@ -281,7 +281,7 @@ check_file(_, Hashes, PieceLen, Location, FileSize, _, _) ->
 
 skip_bytes(Hashes, PieceLen, Location, FileSize) ->
     Remain = FileSize - Location,
-    Num    = ebt_lib:ceil(Remain / PieceLen),
+    Num    = ngbt_lib:ceil(Remain / PieceLen),
     Bytes  = 20 * Num,
 
     case Hashes of
