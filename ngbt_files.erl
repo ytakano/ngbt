@@ -23,7 +23,7 @@
 
 -record(file, {length, md5sum, is_completed}).
 
--record(state, {piece_length, hashes, paths = [], files}).
+-record(state, {piece_length, hashes, paths = [], files, indices}).
 
 %%%===================================================================
 %%% API
@@ -77,7 +77,7 @@ stop(PID) ->
 init([Info]) ->
     PID = self(),
     spawn_link(fun() -> init_files(PID, Info) end),
-    {ok, #state{}}.
+    {ok, #state{indices = ets:new(indices, [set, private, {keypos, 1}])}}.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -112,16 +112,21 @@ handle_cast({init_files, Info}, State) ->
 
     io:format("Paths = ~p~n", [Paths]),
 
+    init_indices(Paths, Files, State#state.indices,
+                 Info#torrent_info.piece_length, 0, 0, 0),
+
     NewFiles = check_files(Paths,
                            Info#torrent_info.pieces,
                            Info#torrent_info.piece_length,
-                           Files),
+                           Files,
+                           State#state.indices),
 
-    {stop, normal, State#state{piece_length = Info#torrent_info.piece_length,
-                               hashes       = Info#torrent_info.pieces,
-                               paths        = Paths,
-                               files        = NewFiles}};
+    {noreply, State#state{piece_length = Info#torrent_info.piece_length,
+                          hashes       = Info#torrent_info.pieces,
+                          paths        = Paths,
+                          files        = NewFiles}};
 handle_cast(stop, State) ->
+    ets:delete(State#state.indices),
     {stop, normal, State};
 handle_cast(_Msg, State) ->
     {noreply, State}.
@@ -196,13 +201,16 @@ gen_paths_and_files(Dir, [H | T], Paths, Files) ->
 gen_paths_and_files(_, [], Paths, Files) ->
     {lists:reverse(Paths), Files}.
 
-check_files(Paths, Hashes, PieceLen, Files) ->
-    check_files(Paths, Hashes, PieceLen, 0, Files, crypto:sha_init(), 0).
+check_files(Paths, Hashes, PieceLen, Files, Indices) ->
+    check_files(Paths, Hashes, PieceLen, 0, Files, crypto:sha_init(), 0, 0,
+                Indices).
 
-check_files([H | T], Hashes, PieceLen, Location, Files, Context, Read) ->
+check_files([H | T], Hashes, PieceLen, Location, Files, Context, Read, Index,
+            Indices) ->
     io:format("Path = ~s:~n", [H]),
     io:format("Read     = ~p~n", [Read]),
     io:format("PieceLen = ~p~n", [PieceLen]),
+    io:format("Num = ~p~n", [byte_size(Hashes) / 20]),
 
     case dict:find(H, Files) of
         {ok, [File | _]} ->
@@ -211,12 +219,13 @@ check_files([H | T], Hashes, PieceLen, Location, Files, Context, Read) ->
                     {NewHashes,
                      NewLocation,
                      NewContext,
-                     NewRead} = check_file(IoDevice, Hashes, PieceLen,
-                                           Location, File#file.length,
-                                           Context, Read),
+                     NewRead,
+                     NewIndex} = check_file(IoDevice, Hashes, PieceLen,
+                                            Location, File#file.length,
+                                            Context, Read, Index, Indices),
 
                     check_files(T, NewHashes, PieceLen, NewLocation, Files,
-                                NewContext, NewRead);
+                                NewContext, NewRead, NewIndex, Indices);
                 _ ->
                     if
                         File#file.length =< Location ->
@@ -229,7 +238,8 @@ check_files([H | T], Hashes, PieceLen, Location, Files, Context, Read) ->
                                     check_files(T, NewHashes, PieceLen,
                                                 PieceLen * Num - TailLen,
                                                 File#file.length,
-                                                crypto:sha_init(), 0);
+                                                crypto:sha_init(), 0,
+                                                Index + Num, Indices);
                                 _ ->
                                     %% TODO: handle error
                                     ok
@@ -237,57 +247,123 @@ check_files([H | T], Hashes, PieceLen, Location, Files, Context, Read) ->
                         true ->
                             check_files(T, Hashes, PieceLen,
                                         Location - File#file.length,
-                                        File#file.length, crypto:sha_init(), 0)
+                                        File#file.length, crypto:sha_init(), 0,
+                                        Index, Indices)
                     end
             end;
         _ ->
             ok
     end;
-check_files([], _, _, _, _, _, _) ->
+check_files([], <<Hash:20/binary>>, _, _, _, Context, _, Index, Indices) ->
+    HashPiece = crypto:sha_final(Context),
+
+    io:format("    Index = ~p~n", [Index]),
+    io:format("    Hash1 = ~p~n", [Hash]),
+    io:format("    Hash2 = ~p~n", [HashPiece]),
+
+    if
+        Hash =:= HashPiece ->
+            toggle_true(Index, Indices);
+        true ->
+            ok
+    end;
+check_files([], _, _, _, _, _, _, _, _) ->
     ok.
 
 check_file(IoDevice, Hashes = <<Hash:20/binary, NewHashes/binary>>, PieceLen,
-           Location, FileSize, Context, Read) ->
+           Location, FileSize, Context, Read, Index, Indices) ->
     case file:pread(IoDevice, Location, PieceLen - Read) of
         {ok, Data} ->
             if
                 byte_size(Data) + Read =:= PieceLen ->
-                    Digest = crypto:sha_final(crypto:sha_update(Context, Data)),
+                    HashPiece = crypto:sha_final(crypto:sha_update(Context,
+                                                                   Data)),
 
+                    io:format("    Index = ~p~n", [Index]),
                     io:format("    Hash1 = ~p~n", [Hash]),
-                    io:format("    Hash2 = ~p~n", [Digest]),
+                    io:format("    Hash2 = ~p~n", [HashPiece]),
 
                     %% TODO: compare Hash and Digest
 
+                    if
+                        Hash =:= HashPiece ->
+                            toggle_true(Index, Indices);
+                        true ->
+                            ok
+                    end,
+
                     check_file(IoDevice, NewHashes, PieceLen,
                                Location + PieceLen - Read, FileSize,
-                               crypto:sha_init(), 0);
+                               crypto:sha_init(), 0, Index + 1, Indices);
                 true ->
                     if
                         Location + byte_size(Data) =:= FileSize ->
                             {Hashes, 0, crypto:sha_update(Context, Data),
-                             byte_size(Data) + Read};
+                             byte_size(Data) + Read, Index};
                         true ->
-                            skip_bytes(Hashes, PieceLen, Location, FileSize)
+                            skip_bytes(Hashes, PieceLen, Location, FileSize,
+                                       Index)
                     end
             end;
         eof ->
-            {Hashes, 0, crypto:sha_init(), 0};
+            {Hashes, 0, crypto:sha_init(), 0, Index};
         _ ->
-            skip_bytes(Hashes, PieceLen, Location, FileSize)
+            skip_bytes(Hashes, PieceLen, Location, FileSize, Index)
     end;
-check_file(_, Hashes, PieceLen, Location, FileSize, _, _) ->
-    skip_bytes(Hashes, PieceLen, Location, FileSize).
+check_file(_, Hashes, PieceLen, Location, FileSize, _, _, Index, _) ->
+    skip_bytes(Hashes, PieceLen, Location, FileSize, Index).
 
-skip_bytes(Hashes, PieceLen, Location, FileSize) ->
+skip_bytes(Hashes, PieceLen, Location, FileSize, Index) ->
     Remain = FileSize - Location,
     Num    = ngbt_lib:ceil(Remain / PieceLen),
     Bytes  = 20 * Num,
 
     case Hashes of
         <<_:Bytes/binary, NewHashes/binary>> ->
-            {NewHashes, Num * PieceLen - Remain, crypto:sha_init(), 0};
+            {NewHashes, Num * PieceLen - Remain, crypto:sha_init(), 0,
+             Index + Num};
         _ ->
             %% TODO: handle error
-            {<<>>, Num * PieceLen - Remain, crypto:sha_init(), 0}
+            {<<>>, Num * PieceLen - Remain, crypto:sha_init(), 0, Index}
+    end.
+
+init_indices(Paths = [H | T], Files, Indices, PieceLen, TotalLen, Index, Pos) ->
+    case dict:find(H, Files) of
+        {ok, [File | _]} ->
+            if
+                TotalLen + File#file.length - Pos < PieceLen ->
+                    add_index(Index, H, Pos, File#file.length - Pos, Indices),
+                    init_indices(T, Files, Indices, PieceLen,
+                                 TotalLen + File#file.length - Pos, Index, 0);
+                TotalLen + File#file.length - Pos =:= PieceLen ->
+                    add_index(Index, H, Pos, File#file.length - Pos, Indices),
+                    init_indices(T, Files, Indices, PieceLen, 0, Index + 1, 0);
+                true ->
+                    add_index(Index, H, Pos, PieceLen - TotalLen, Indices),
+                    init_indices(Paths, Files, Indices, PieceLen, 0, Index + 1,
+                                 PieceLen - TotalLen + Pos)
+            end;
+        _ ->
+            %% TODO: handle error
+            ok
+    end;
+init_indices([], _, _, _, _, _, _) ->
+    ok.
+
+add_index(Index, Path, Pos, Len, TID) ->
+    case ets:lookup(TID, Index) of
+        [{Index, IsCompleted, Paths}] ->
+            L = [{Path, Pos, Len}, lists:reverse(Paths)],
+            NewPaths = lists:reverse(L),
+            ets:insert(TID, {Index, IsCompleted, NewPaths});
+        [] ->
+            ets:insert(TID, {Index, false, [{Path, Pos, Len}]})
+    end.
+
+toggle_true(Index, TID) ->
+    case ets:lookup(TID, Index) of
+        [{Index, _, Paths}] ->
+            ets:insert(TID, {Index, true, Paths});
+        [] ->
+            ok
     end.
