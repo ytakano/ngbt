@@ -11,7 +11,7 @@
 -behaviour(gen_server).
 
 %% API
--export([start_link/1, stop/1]).
+-export([start_link/1, stop/1, write/4]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
@@ -24,6 +24,9 @@
 -record(file, {length, md5sum, is_completed}).
 
 -record(state, {piece_length, hashes, paths = [], files, indices}).
+
+-define(BLOCK_SIZE, 16384).
+-define(MAX_BLOCK_SIZE, 32768).
 
 %%%===================================================================
 %%% API
@@ -48,6 +51,16 @@ start_link(Info) ->
 %%--------------------------------------------------------------------
 init_files(PID, Info) ->
     gen_server:cast(PID, {init_files, Info}).
+
+%%--------------------------------------------------------------------
+%% @doc
+%% write to files
+%%
+%% @spec write(PID, Index, Begin, Data) -> ok
+%% @end
+%%--------------------------------------------------------------------
+write(PID, Index, Begin, Data) ->
+    gen_server:cast(PID, {write, Index, Begin, Data}).
 
 %%--------------------------------------------------------------------
 %% @doc
@@ -107,6 +120,14 @@ handle_call(_Request, _From, State) ->
 %%                                  {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
+handle_cast({init_files, Info}, State)
+  when Info#torrent_info.piece_length < ?BLOCK_SIZE ->
+    %% TODO: handle error
+    {noreply, State};
+handle_cast({init_files, Info}, State)
+  when Info#torrent_info.piece_length rem ?BLOCK_SIZE > 0 ->
+    %% TODO: handle error
+    {noreply, State};
 handle_cast({init_files, Info}, State) ->
     {Paths, Files} = gen_paths_and_files(Info),
 
@@ -125,6 +146,10 @@ handle_cast({init_files, Info}, State) ->
                           hashes       = Info#torrent_info.pieces,
                           paths        = Paths,
                           files        = NewFiles}};
+handle_cast({write, Index, Begin, Data}, State) ->
+    write_to_files(Index, Begin, Data,
+                   State#state.piece_length, State#state.indices),
+    {noreply, State};
 handle_cast(stop, State) ->
     ets:delete(State#state.indices),
     {stop, normal, State};
@@ -207,10 +232,9 @@ check_files(Paths, Hashes, PieceLen, Files, Indices) ->
 
 check_files([H | T], Hashes, PieceLen, Location, Files, Context, Read, Index,
             Indices) ->
-    io:format("Path = ~s:~n", [H]),
+    io:format("Path     = ~s:~n", [H]),
     io:format("Read     = ~p~n", [Read]),
     io:format("PieceLen = ~p~n", [PieceLen]),
-    io:format("Num = ~p~n", [byte_size(Hashes) / 20]),
 
     case dict:find(H, Files) of
         {ok, [File | _]} ->
@@ -256,11 +280,6 @@ check_files([H | T], Hashes, PieceLen, Location, Files, Context, Read, Index,
     end;
 check_files([], <<Hash:20/binary>>, _, _, _, Context, _, Index, Indices) ->
     HashPiece = crypto:sha_final(Context),
-
-    io:format("    Index = ~p~n", [Index]),
-    io:format("    Hash1 = ~p~n", [Hash]),
-    io:format("    Hash2 = ~p~n", [HashPiece]),
-
     if
         Hash =:= HashPiece ->
             toggle_true(Index, Indices);
@@ -278,12 +297,6 @@ check_file(IoDevice, Hashes = <<Hash:20/binary, NewHashes/binary>>, PieceLen,
                 byte_size(Data) + Read =:= PieceLen ->
                     HashPiece = crypto:sha_final(crypto:sha_update(Context,
                                                                    Data)),
-
-                    io:format("    Index = ~p~n", [Index]),
-                    io:format("    Hash1 = ~p~n", [Hash]),
-                    io:format("    Hash2 = ~p~n", [HashPiece]),
-
-                    %% TODO: compare Hash and Digest
 
                     if
                         Hash =:= HashPiece ->
@@ -332,14 +345,17 @@ init_indices(Paths = [H | T], Files, Indices, PieceLen, TotalLen, Index, Pos) ->
         {ok, [File | _]} ->
             if
                 TotalLen + File#file.length - Pos < PieceLen ->
-                    add_index(Index, H, Pos, File#file.length - Pos, Indices),
-                    init_indices(T, Files, Indices, PieceLen,
+                    add_index(Index, H, Pos, File#file.length - Pos, PieceLen,
+                              Indices),
+                    init_indices(T, Files, Indices, PieceLen, 
                                  TotalLen + File#file.length - Pos, Index, 0);
                 TotalLen + File#file.length - Pos =:= PieceLen ->
-                    add_index(Index, H, Pos, File#file.length - Pos, Indices),
+                    add_index(Index, H, Pos, File#file.length - Pos, PieceLen,
+                              Indices),
                     init_indices(T, Files, Indices, PieceLen, 0, Index + 1, 0);
                 true ->
-                    add_index(Index, H, Pos, PieceLen - TotalLen, Indices),
+                    add_index(Index, H, Pos, PieceLen - TotalLen, PieceLen,
+                              Indices),
                     init_indices(Paths, Files, Indices, PieceLen, 0, Index + 1,
                                  PieceLen - TotalLen + Pos)
             end;
@@ -350,20 +366,36 @@ init_indices(Paths = [H | T], Files, Indices, PieceLen, TotalLen, Index, Pos) ->
 init_indices([], _, _, _, _, _, _) ->
     ok.
 
-add_index(Index, Path, Pos, Len, TID) ->
+add_index(Index, Path, Pos, Len, PieceLen, TID) ->
     case ets:lookup(TID, Index) of
-        [{Index, IsCompleted, Paths}] ->
+        [{Index, IsCompleted, Paths, Blocks}] ->
             L = [{Path, Pos, Len}, lists:reverse(Paths)],
             NewPaths = lists:reverse(L),
-            ets:insert(TID, {Index, IsCompleted, NewPaths});
+            ets:insert(TID, {Index, IsCompleted, NewPaths, Blocks});
         [] ->
-            ets:insert(TID, {Index, false, [{Path, Pos, Len}]})
+            ets:insert(TID, {Index, false, [{Path, Pos, Len}],
+                             gen_list([], trunc(PieceLen / ?BLOCK_SIZE),
+                                      false)})
     end.
 
 toggle_true(Index, TID) ->
     case ets:lookup(TID, Index) of
-        [{Index, _, Paths}] ->
-            ets:insert(TID, {Index, true, Paths});
+        [{Index, _, Paths, Blocks}] ->
+            ets:insert(TID, {Index, true, Paths, [true || _ <- Blocks]});
         [] ->
+            ok
+    end.
+
+gen_list(List, Num, Val) when Num =:= 0 ->
+    List;
+gen_list(List, Num, Val) ->
+    gen_list([Val | List], Num - 1, Val).
+
+write_to_files(Index, Begin, Data, PieceLen, TID) ->
+    case ets:lookup(TID, Index) of
+        [{Index, false, Paths, Blocks}] ->
+            %% TODO: write data to files
+            ok;
+        _ ->
             ok
     end.
