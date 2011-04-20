@@ -23,7 +23,7 @@
 
 -record(file, {length, md5sum, is_completed}).
 
--record(state, {piece_length, hashes, paths = [], files, indices}).
+-record(state, {piece_length, hashes, paths = [], files, blocks}).
 
 -define(BLOCK_SIZE, 16384).
 -define(MAX_BLOCK_SIZE, 32768).
@@ -90,7 +90,7 @@ stop(PID) ->
 init([Info]) ->
     PID = self(),
     spawn_link(fun() -> init_files(PID, Info) end),
-    {ok, #state{indices = ets:new(indices, [set, private, {keypos, 1}])}}.
+    {ok, #state{blocks = ets:new(blocks, [set, private, {keypos, 1}])}}.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -133,25 +133,26 @@ handle_cast({init_files, Info}, State) ->
 
     io:format("Paths = ~p~n", [Paths]),
 
-    init_indices(Paths, Files, State#state.indices,
-                 Info#torrent_info.piece_length, 0, 0, 0),
+    init_blocks(Paths, Files, State#state.blocks, 0, 0, 0),
 
     NewFiles = check_files(Paths,
                            Info#torrent_info.pieces,
                            Info#torrent_info.piece_length,
                            Files,
-                           State#state.indices),
+                           State#state.blocks),
 
     {noreply, State#state{piece_length = Info#torrent_info.piece_length,
                           hashes       = Info#torrent_info.pieces,
                           paths        = Paths,
                           files        = NewFiles}};
-handle_cast({write, Index, Begin, Data}, State) ->
+handle_cast({write, Index, Begin, Data}, State)
+  when Begin rem State#state.piece_length == 0 andalso
+       byte_size(Data) == ?BLOCK_SIZE ->
     write_to_files(Index, Begin, Data,
-                   State#state.piece_length, State#state.indices),
+                   State#state.piece_length, State#state.blocks),
     {noreply, State};
 handle_cast(stop, State) ->
-    ets:delete(State#state.indices),
+    ets:delete(State#state.blocks),
     {stop, normal, State};
 handle_cast(_Msg, State) ->
     {noreply, State}.
@@ -226,12 +227,12 @@ gen_paths_and_files(Dir, [H | T], Paths, Files) ->
 gen_paths_and_files(_, [], Paths, Files) ->
     {lists:reverse(Paths), Files}.
 
-check_files(Paths, Hashes, PieceLen, Files, Indices) ->
+check_files(Paths, Hashes, PieceLen, Files, Blocks) ->
     check_files(Paths, Hashes, PieceLen, 0, Files, crypto:sha_init(), 0, 0,
-                Indices).
+                Blocks).
 
 check_files([H | T], Hashes, PieceLen, Location, Files, Context, Read, Index,
-            Indices) ->
+            Blocks) ->
     io:format("Path     = ~s:~n", [H]),
     io:format("Read     = ~p~n", [Read]),
     io:format("PieceLen = ~p~n", [PieceLen]),
@@ -246,10 +247,10 @@ check_files([H | T], Hashes, PieceLen, Location, Files, Context, Read, Index,
                      NewRead,
                      NewIndex} = check_file(IoDevice, Hashes, PieceLen,
                                             Location, File#file.length,
-                                            Context, Read, Index, Indices),
+                                            Context, Read, Index, Blocks),
 
                     check_files(T, NewHashes, PieceLen, NewLocation, Files,
-                                NewContext, NewRead, NewIndex, Indices);
+                                NewContext, NewRead, NewIndex, Blocks);
                 _ ->
                     if
                         File#file.length =< Location ->
@@ -263,7 +264,7 @@ check_files([H | T], Hashes, PieceLen, Location, Files, Context, Read, Index,
                                                 PieceLen * Num - TailLen,
                                                 File#file.length,
                                                 crypto:sha_init(), 0,
-                                                Index + Num, Indices);
+                                                Index + Num, Blocks);
                                 _ ->
                                     %% TODO: handle error
                                     ok
@@ -272,17 +273,18 @@ check_files([H | T], Hashes, PieceLen, Location, Files, Context, Read, Index,
                             check_files(T, Hashes, PieceLen,
                                         Location - File#file.length,
                                         File#file.length, crypto:sha_init(), 0,
-                                        Index, Indices)
+                                        Index, Blocks)
                     end
             end;
         _ ->
             ok
     end;
-check_files([], <<Hash:20/binary>>, _, _, _, Context, _, Index, Indices) ->
+check_files([], <<Hash:20/binary>>, PieceLen, _, _, Context, _, Index,
+            Blocks) ->
     HashPiece = crypto:sha_final(Context),
     if
         Hash =:= HashPiece ->
-            toggle_true(Index, Indices);
+            set_index_state(Index, completed, PieceLen, Blocks);
         true ->
             ok
     end;
@@ -290,7 +292,7 @@ check_files([], _, _, _, _, _, _, _, _) ->
     ok.
 
 check_file(IoDevice, Hashes = <<Hash:20/binary, NewHashes/binary>>, PieceLen,
-           Location, FileSize, Context, Read, Index, Indices) ->
+           Location, FileSize, Context, Read, Index, Blocks) ->
     case file:pread(IoDevice, Location, PieceLen - Read) of
         {ok, Data} ->
             if
@@ -300,14 +302,14 @@ check_file(IoDevice, Hashes = <<Hash:20/binary, NewHashes/binary>>, PieceLen,
 
                     if
                         Hash =:= HashPiece ->
-                            toggle_true(Index, Indices);
+                            set_index_state(Index, completed, PieceLen, Blocks);
                         true ->
                             ok
                     end,
 
                     check_file(IoDevice, NewHashes, PieceLen,
                                Location + PieceLen - Read, FileSize,
-                               crypto:sha_init(), 0, Index + 1, Indices);
+                               crypto:sha_init(), 0, Index + 1, Blocks);
                 true ->
                     if
                         Location + byte_size(Data) =:= FileSize ->
@@ -340,60 +342,67 @@ skip_bytes(Hashes, PieceLen, Location, FileSize, Index) ->
             {<<>>, Num * PieceLen - Remain, crypto:sha_init(), 0, Index}
     end.
 
-init_indices(Paths = [H | T], Files, Indices, PieceLen, TotalLen, Index, Pos) ->
+init_blocks(Paths = [H | T], Files, Blocks, TotalLen, Block, Pos) ->
     case dict:find(H, Files) of
         {ok, [File | _]} ->
             if
-                TotalLen + File#file.length - Pos < PieceLen ->
-                    add_index(Index, H, Pos, File#file.length - Pos, PieceLen,
-                              Indices),
-                    init_indices(T, Files, Indices, PieceLen, 
-                                 TotalLen + File#file.length - Pos, Index, 0);
-                TotalLen + File#file.length - Pos =:= PieceLen ->
-                    add_index(Index, H, Pos, File#file.length - Pos, PieceLen,
-                              Indices),
-                    init_indices(T, Files, Indices, PieceLen, 0, Index + 1, 0);
+                TotalLen + File#file.length - Pos < ?BLOCK_SIZE ->
+                    add_index(Block, H, Pos, File#file.length - Pos,
+                              Blocks),
+                    init_blocks(T, Files, Blocks,
+                                TotalLen + File#file.length - Pos, Block, 0);
+                TotalLen + File#file.length - Pos == ?BLOCK_SIZE ->
+                    add_index(Block, H, Pos, File#file.length - Pos,
+                              Blocks),
+                    init_blocks(T, Files, Blocks, 0, Block + 1, 0);
                 true ->
-                    add_index(Index, H, Pos, PieceLen - TotalLen, PieceLen,
-                              Indices),
-                    init_indices(Paths, Files, Indices, PieceLen, 0, Index + 1,
-                                 PieceLen - TotalLen + Pos)
+                    add_index(Block, H, Pos, ?BLOCK_SIZE - TotalLen,
+                              Blocks),
+                    init_blocks(Paths, Files, Blocks, 0, Block + 1,
+                                ?BLOCK_SIZE - TotalLen + Pos)
             end;
         _ ->
             %% TODO: handle error
             ok
     end;
-init_indices([], _, _, _, _, _, _) ->
+init_blocks([], _, _, _, _, _) ->
     ok.
 
-add_index(Index, Path, Pos, Len, PieceLen, TID) ->
-    case ets:lookup(TID, Index) of
-        [{Index, IsCompleted, Paths, Blocks}] ->
+add_index(Block, Path, Pos, Len, TID) ->
+    case ets:lookup(TID, Block) of
+        [{Block, State, Paths}] ->
             L = [{Path, Pos, Len}, lists:reverse(Paths)],
             NewPaths = lists:reverse(L),
-            ets:insert(TID, {Index, IsCompleted, NewPaths, Blocks});
+            ets:insert(TID, {Block, State, NewPaths});
         [] ->
-            ets:insert(TID, {Index, false, [{Path, Pos, Len}],
-                             gen_list([], trunc(PieceLen / ?BLOCK_SIZE),
-                                      false)})
+            ets:insert(TID, {Block, incompleted, [{Path, Pos, Len}]})
     end.
 
-toggle_true(Index, TID) ->
-    case ets:lookup(TID, Index) of
-        [{Index, _, Paths, Blocks}] ->
-            ets:insert(TID, {Index, true, Paths, [true || _ <- Blocks]});
+set_index_state(Index, State, PieceLen, TID) ->
+    N = trunc(PieceLen / ?BLOCK_SIZE),
+    Block = Index * N,
+    set_block_state(Block, Block + N, State, TID).
+
+set_block_state(Block, State, TID) ->
+    case ets:lookup(TID, Block) of
+        [{Block, _, Paths}] ->
+            ets:insert(TID, {Block, State, Paths});
         [] ->
             ok
     end.
 
-gen_list(List, Num, Val) when Num =:= 0 ->
-    List;
-gen_list(List, Num, Val) ->
-    gen_list([Val | List], Num - 1, Val).
+set_block_state(Begin, End, State, TID) when Begin < End -> 
+    set_block_state(Begin, State, TID),
+    set_block_state(Begin + 1, End, State, TID);
+set_block_state(_, _, _, _) ->
+    ok.
 
 write_to_files(Index, Begin, Data, PieceLen, TID) ->
-    case ets:lookup(TID, Index) of
-        [{Index, false, Paths, Blocks}] ->
+    N = PieceLen / ?BLOCK_SIZE,
+    Block = trunc(Index * N + Begin / ?BLOCK_SIZE),
+
+    case ets:lookup(TID, Block) of
+        [{Block, _, Paths}] ->
             %% TODO: write data to files
             ok;
         _ ->
