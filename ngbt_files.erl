@@ -121,12 +121,10 @@ handle_call(_Request, _From, State) ->
 %% @end
 %%--------------------------------------------------------------------
 handle_cast({init_files, Info}, State)
-  when Info#torrent_info.piece_length < ?BLOCK_SIZE ->
+  when Info#torrent_info.piece_length < ?BLOCK_SIZE orelse
+       Info#torrent_info.piece_length rem ?BLOCK_SIZE > 0 ->
     %% TODO: handle error
-    {noreply, State};
-handle_cast({init_files, Info}, State)
-  when Info#torrent_info.piece_length rem ?BLOCK_SIZE > 0 ->
-    %% TODO: handle error
+    %% invalid torrent file
     {noreply, State};
 handle_cast({init_files, Info}, State) ->
     {Paths, Files} = gen_paths_and_files(Info),
@@ -146,8 +144,7 @@ handle_cast({init_files, Info}, State) ->
                           paths        = Paths,
                           files        = NewFiles}};
 handle_cast({write, Index, Begin, Data}, State)
-  when Begin rem State#state.piece_length == 0 andalso
-       byte_size(Data) == ?BLOCK_SIZE ->
+  when Begin rem State#state.piece_length == 0 ->
     write_to_files(Index, Begin, Data,
                    State#state.piece_length, State#state.blocks),
     {noreply, State};
@@ -207,7 +204,7 @@ gen_paths_and_files(Info) when not is_list(Info#torrent_info.files) ->
     Files = dict:append(Path, File, dict:new()),
 
     {[Path], Files};
-gen_paths_and_files(Info) when is_binary(Info#torrent_info.name) and
+gen_paths_and_files(Info) when is_binary(Info#torrent_info.name) andalso
                                is_list(Info#torrent_info.files) ->
     gen_paths_and_files(binary_to_list(Info#torrent_info.name),
                         Info#torrent_info.files, [], dict:new());
@@ -267,6 +264,7 @@ check_files([H | T], Hashes, PieceLen, Location, Files, Context, Read, Index,
                                                 Index + Num, Blocks);
                                 _ ->
                                     %% TODO: handle error
+                                    %% invalid torrent file
                                     ok
                             end;
                         true ->
@@ -339,6 +337,7 @@ skip_bytes(Hashes, PieceLen, Location, FileSize, Index) ->
              Index + Num};
         _ ->
             %% TODO: handle error
+            %% invalid torrent file
             {<<>>, Num * PieceLen - Remain, crypto:sha_init(), 0, Index}
     end.
 
@@ -363,6 +362,7 @@ init_blocks(Paths = [H | T], Files, Blocks, TotalLen, Block, Pos) ->
             end;
         _ ->
             %% TODO: handle error
+            %% invalid torrent file
             ok
     end;
 init_blocks([], _, _, _, _, _) ->
@@ -403,8 +403,38 @@ write_to_files(Index, Begin, Data, PieceLen, TID) ->
 
     case ets:lookup(TID, Block) of
         [{Block, _, Paths}] ->
-            %% TODO: write data to files
-            ok;
+            Total = lists:sum([Len || {_, _, Len} <- Paths]),
+
+            if
+                Total =:= byte_size(Data) ->
+                    case write_to_files(Paths, Data) of
+                        ok ->
+                            ets:insert(TID, {Block, completed, Paths}),
+                            %% TODO: check hash value
+                            ok;
+                        _ ->
+                            ok
+                    end;
+                true ->
+                    ok
+            end;
         _ ->
             ok
     end.
+
+write_to_files([{Path, Pos, Len} | T], Data) ->
+    <<DataW:Len/binary, Rem/binary>> = Data,
+
+    case file:open(Path, [append, raw, binary]) of
+        {ok, IoDev} ->
+            file:pwrite(IoDev, Pos, DataW),
+            file:close(IoDev);
+        _ ->
+            %% TODO: handle error
+            %% cannot open file
+            error
+    end,
+
+    write_to_files(T, Rem);
+write_to_files([], _) ->
+    ok.
