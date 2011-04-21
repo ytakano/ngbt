@@ -144,8 +144,10 @@ handle_cast({init_files, Info}, State) ->
                           paths        = Paths,
                           files        = NewFiles}};
 handle_cast({write, Index, Begin, Data}, State)
-  when Begin rem State#state.piece_length == 0 ->
+  when Begin rem State#state.piece_length == 0 andalso
+       Index < byte_size(State#state.hashes) / 20 ->
     write_to_files(Index, Begin, Data,
+                   binary_part(State#state.hashes, Index, 20),
                    State#state.piece_length, State#state.blocks),
     {noreply, State};
 handle_cast(stop, State) ->
@@ -397,7 +399,7 @@ set_block_state(Begin, End, State, TID) when Begin < End ->
 set_block_state(_, _, _, _) ->
     ok.
 
-write_to_files(Index, Begin, Data, PieceLen, TID) ->
+write_to_files(Index, Begin, Data, Hash, PieceLen, TID) ->
     N = PieceLen / ?BLOCK_SIZE,
     Block = trunc(Index * N + Begin / ?BLOCK_SIZE),
 
@@ -409,9 +411,8 @@ write_to_files(Index, Begin, Data, PieceLen, TID) ->
                 Total =:= byte_size(Data) ->
                     case write_to_files(Paths, Data) of
                         ok ->
-                            ets:insert(TID, {Block, completed, Paths}),
-                            %% TODO: check hash value
-                            ok;
+                            ets:insert(TID, {Block, downloaded, Paths}),
+                            check_piece(Index, trunc(N), Hash, TID);
                         _ ->
                             ok
                     end;
@@ -438,3 +439,53 @@ write_to_files([{Path, Pos, Len} | T], Data) ->
     write_to_files(T, Rem);
 write_to_files([], _) ->
     ok.
+
+check_piece(Index, NumBlock, Hash, TID) ->
+    Begin = Index * NumBlock,
+    End   = Begin + NumBlock,
+
+    case check_piece2(Begin, End, TID) of
+        true ->
+            check_piece3(Begin, End, Hash, crypto:sha_init(), TID);
+        _ ->
+            ok
+    end.
+
+check_piece2(Begin, End, TID) when Begin < End ->
+    case ets:lookup(TID, Begin) of
+        [{Begin, downloaded, _}] ->
+            check_piece2(Begin + 1, End, TID);
+        _ ->
+            false
+    end;
+check_piece2(_, _, _) ->
+    true.
+
+check_piece3(Begin, End, Hash, Context, TID) when Begin < End ->
+    case ets:lookup(TID, Begin) of
+        [{Begin, downloaded, Paths}] ->
+            NewContext = update_context(Paths, Context),
+            check_piece3(Begin + 1, End, Hash, NewContext, TID);
+        [] ->
+            false
+    end;
+check_piece3(Begin, End, Hash, Context, TID) ->
+    case crypto:sha_final(Context) of
+        Hash ->
+            %% piece was just downloaded
+            set_block_state(Begin, End, completed, TID);
+        _ ->
+            %% piece downloading must be failed
+            set_block_state(Begin, End, incompleted, TID)
+    end.
+
+update_context([{Path, Pos, Len} | T], Context) ->
+    case file:open(Path, [read, raw, binary]) of
+        {ok, IoDev} ->
+            Data = file:pread(IoDev, Pos, Len),
+            update_context(T, crypto:sha_update(Context, Data));
+        _ ->
+            Context
+    end;
+update_context([], Context) ->
+    Context.
