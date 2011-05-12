@@ -11,7 +11,7 @@
 -behaviour(gen_server).
 
 %% API
--export([start_link/1, stop/1, write/4]).
+-export([start_link/1, stop/1, write/4, read/4]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
@@ -54,13 +54,23 @@ init_files(PID, Info) ->
 
 %%--------------------------------------------------------------------
 %% @doc
-%% write to files
+%% write data to files
 %%
 %% @spec write(PID, Index, Begin, Data) -> ok
 %% @end
 %%--------------------------------------------------------------------
 write(PID, Index, Begin, Data) ->
     gen_server:cast(PID, {write, Index, Begin, Data}).
+
+%%--------------------------------------------------------------------
+%% @doc
+%% read data from files
+%%
+%% @spec read(PID, Index, Begin, Size) -> ok
+%% @end
+%%--------------------------------------------------------------------
+read(PID, Index, Begin, Size) ->
+    gen_server:cast(PID, {read, Index, Begin, Size}).
 
 %%--------------------------------------------------------------------
 %% @doc
@@ -106,6 +116,21 @@ init([Info]) ->
 %%                                   {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
+handle_call({read, Index, Begin, Len}, _From, State)
+  when Index < byte_size(State#state.hashes) / 20 andalso
+       Len =< State#state.piece_length - Begin ->
+
+    Reply = case read_from_files(Index, Begin, Len, State#state.piece_length,
+                                 State#state.blocks) of
+                {ok, Data} ->
+                    {ok, Data};
+                _ ->
+                    false
+            end,
+
+    %% TODO: reply by MPI
+
+    {reply, Reply, State};
 handle_call(_Request, _From, State) ->
     Reply = ok,
     {reply, Reply, State}.
@@ -145,10 +170,13 @@ handle_cast({init_files, Info}, State) ->
                           files        = NewFiles}};
 handle_cast({write, Index, Begin, Data}, State)
   when Begin rem State#state.piece_length == 0 andalso
-       Index < byte_size(State#state.hashes) / 20 ->
+       Index < byte_size(State#state.hashes) / 20 andalso
+       byte_size(Data) =< ?BLOCK_SIZE ->
+
     write_to_files(Index, Begin, Data,
                    binary_part(State#state.hashes, Index, 20),
                    State#state.piece_length, State#state.blocks),
+
     {noreply, State};
 handle_cast(stop, State) ->
     ets:delete(State#state.blocks),
@@ -404,7 +432,7 @@ write_to_files(Index, Begin, Data, Hash, PieceLen, TID) ->
     Block = trunc(Index * N + Begin / ?BLOCK_SIZE),
 
     case ets:lookup(TID, Block) of
-        [{Block, _, Paths}] ->
+        [{Block, incompleted, Paths}] ->
             Total = lists:sum([Len || {_, _, Len} <- Paths]),
 
             if
@@ -475,7 +503,7 @@ check_piece3(Begin, End, Hash, Context, TID) ->
             %% piece was just downloaded
             set_block_state(Begin, End, completed, TID);
         _ ->
-            %% piece downloading must be failed
+            %% piece downloading must have been failed
             set_block_state(Begin, End, incompleted, TID)
     end.
 
@@ -483,9 +511,71 @@ update_context([{Path, Pos, Len} | T], Context) ->
     case file:open(Path, [read, raw, binary]) of
         {ok, IoDev} ->
             Data = file:pread(IoDev, Pos, Len),
+            file:close(IoDev),
             update_context(T, crypto:sha_update(Context, Data));
         _ ->
             Context
     end;
 update_context([], Context) ->
     Context.
+
+read_from_files(Index, Begin, Len, PieceLen, TID) ->
+    N = PieceLen / ?BLOCK_SIZE,
+    Block = Index * N + Begin / ?BLOCK_SIZE,
+
+    read_blocks(Block, Begin rem ?BLOCK_SIZE, Len, TID, <<>>).
+
+read_blocks(Block, Begin, Len, TID, Data) when Len > 0 ->
+    case ets:lookup(TID, Block) of
+        [{Block, downloaded, Paths}] ->
+            case read_files(Paths, Begin, Len, <<>>) of
+                {ok, Bin} ->
+                    read_blocks(Block + 1, 0, Len - byte_size(Bin), TID,
+                                <<Data/binary, Bin/binary>>);
+                _ ->
+                    false
+            end;
+        _ ->
+            false
+    end;
+read_blocks(_, _, _, _, Data) ->
+    Data.
+
+read_files([{_, _, PathLen} | T], Begin, Len, Data) when PathLen < Begin ->
+    read_files(T, Begin - PathLen, Len, Data);
+read_files([{Path, Pos, PathLen} | T], Begin, Len, Data) when Len > 0->
+    PLen = PathLen - Begin,
+
+    ReadLen = if
+                  Len > PLen ->
+                      PLen;
+                  true ->
+                      Len
+              end,
+
+    case file:open(Path, [append, raw, binary]) of
+        {ok, IoDev} ->
+            Ret = file:pread(IoDev, Pos + Begin, ReadLen),
+            file:close(IoDev),
+
+            case Ret of
+                {ok, ReadData} ->
+                    if
+                        ReadLen =:= byte_size(ReadData) ->
+                            read_files(T, 0, Len - ReadLen,
+                                       <<Data/binary, ReadData/binary>>);
+                        true ->
+                            false
+                    end;
+                _ ->
+                    false
+            end;
+        _ ->
+            false
+    end;
+read_files(_, _, Len, Data) when Len =:= 0 ->
+    {ok, Data};
+read_files([], _, _, Data) ->
+    {ok, Data};
+read_files(_, _, _, _) ->
+    false.
