@@ -34,7 +34,8 @@
                 peers,
                 pid_pref,
                 pid_tracker_client,
-                pid_files}).
+                pid_files,
+                pid_pieces}).
 
 %%%===================================================================
 %%% API
@@ -150,11 +151,25 @@ handle_call({read_torrent, File}, _From, State) ->
                        State#state.trackers
                end,
 
+    PIDPieces = case Reply of
+                    ok ->
+                        Info = Torrent#torrent.info,
+                        Num = trunc(byte_size(Info#torrent_info.pieces) / 20),
+                        case ngbt_pieces:start_link(Num) of
+                            {ok, P1} ->
+                                P1;
+                            _ ->
+                                State#state.pid_pieces
+                        end;
+                    _ ->
+                        State#state.pid_pieces
+                end,
+
     PIDFiles = case Reply of
                    ok ->
                        case ngbt_files:start_link(Torrent#torrent.info) of
-                           {ok, P} ->
-                               P;
+                           {ok, P2} ->
+                               P2;
                            _ ->
                                State#state.pid_files
                        end;
@@ -163,7 +178,8 @@ handle_call({read_torrent, File}, _From, State) ->
                end,
 
     {reply, Reply, State#state{torrent = Torrent, info_hash = Hash,
-                               trackers = Trackers, pid_files = PIDFiles}};
+                               trackers = Trackers, pid_files = PIDFiles,
+                               pid_pieces = PIDPieces}};
 handle_call(print_torrent, _From, State) ->
     print_torrent_info(State#state.torrent),
     Reply = ok,
@@ -199,6 +215,7 @@ handle_cast(stop_download, State) when State#state.stat =:= downloading ->
 handle_cast(stop, State) ->
     ngbt_tracker_client:stop(State#state.pid_tracker_client),
     ngbt_files:stop(State#state.pid_files),
+    ngbt_pieces:stop(State#state.pid_pieces),
     {stop, normal, State};
 handle_cast(_Msg, State) ->
     {noreply, State}.
