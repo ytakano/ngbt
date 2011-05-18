@@ -402,10 +402,10 @@ start_down(State) when length(State#state.trackers) > 0 ->
     [Tracker | _] = State#state.trackers,
 
     case ngbt_tracker_client:start_link(Tracker,
-                                       State#state.info_hash,
-                                       PeerID,
-                                       Port,
-                                       0) of
+                                        State#state.info_hash,
+                                        PeerID,
+                                        Port,
+                                        0) of
         {ok, PID} ->
             case ngbt_tracker_client:get_peers(PID) of
                 {ok, _} ->
