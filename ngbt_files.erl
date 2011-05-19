@@ -11,7 +11,7 @@
 -behaviour(gen_server).
 
 %% API
--export([start_link/1, stop/1, write/4, read/4]).
+-export([start_link/2, stop/1, write/4, read/4]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
@@ -23,7 +23,8 @@
 
 -record(file, {length, md5sum, is_completed}).
 
--record(state, {piece_length, hashes, paths = [], files, blocks}).
+-record(state, {piece_length, hashes, paths = [], files, blocks,
+                pid_pieces}).
 
 -define(BLOCK_SIZE, 16384).
 -define(MAX_BLOCK_SIZE, 32768).
@@ -39,8 +40,8 @@
 %% @spec start_link() -> {ok, Pid} | ignore | {error, Error}
 %% @end
 %%--------------------------------------------------------------------
-start_link(Info) ->
-    gen_server:start_link(?MODULE, [Info], []).
+start_link(Info, PIDPieces) ->
+    gen_server:start_link(?MODULE, [Info, PIDPieces], []).
 
 %%--------------------------------------------------------------------
 %% @doc
@@ -97,10 +98,11 @@ stop(PID) ->
 %%                     {stop, Reason}
 %% @end
 %%--------------------------------------------------------------------
-init([Info]) ->
+init([Info, PIDPieces]) ->
     PID = self(),
     spawn_link(fun() -> init_files(PID, Info) end),
-    {ok, #state{blocks = ets:new(blocks, [set, private, {keypos, 1}])}}.
+    {ok, #state{blocks = ets:new(blocks, [set, private, {keypos, 1}]),
+                pid_pieces = PIDPieces}}.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -162,7 +164,8 @@ handle_cast({init_files, Info}, State) ->
                            Info#torrent_info.pieces,
                            Info#torrent_info.piece_length,
                            Files,
-                           State#state.blocks),
+                           State#state.blocks,
+                           State#state.pid_pieces),
 
     {noreply, State#state{piece_length = Info#torrent_info.piece_length,
                           hashes       = Info#torrent_info.pieces,
@@ -254,12 +257,12 @@ gen_paths_and_files(Dir, [H | T], Paths, Files) ->
 gen_paths_and_files(_, [], Paths, Files) ->
     {lists:reverse(Paths), Files}.
 
-check_files(Paths, Hashes, PieceLen, Files, Blocks) ->
+check_files(Paths, Hashes, PieceLen, Files, Blocks, PIDPieces) ->
     check_files(Paths, Hashes, PieceLen, 0, Files, crypto:sha_init(), 0, 0,
-                Blocks).
+                Blocks, PIDPieces).
 
 check_files([H | T], Hashes, PieceLen, Location, Files, Context, Read, Index,
-            Blocks) ->
+            Blocks, PIDPieces) ->
     io:format("Path     = ~s:~n", [H]),
     io:format("Read     = ~p~n", [Read]),
     io:format("PieceLen = ~p~n", [PieceLen]),
@@ -274,10 +277,12 @@ check_files([H | T], Hashes, PieceLen, Location, Files, Context, Read, Index,
                      NewRead,
                      NewIndex} = check_file(IoDevice, Hashes, PieceLen,
                                             Location, File#file.length,
-                                            Context, Read, Index, Blocks),
+                                            Context, Read, Index, Blocks,
+                                            PIDPieces),
 
                     check_files(T, NewHashes, PieceLen, NewLocation, Files,
-                                NewContext, NewRead, NewIndex, Blocks);
+                                NewContext, NewRead, NewIndex, Blocks,
+                                PIDPieces);
                 _ ->
                     if
                         File#file.length =< Location ->
@@ -291,7 +296,8 @@ check_files([H | T], Hashes, PieceLen, Location, Files, Context, Read, Index,
                                                 PieceLen * Num - TailLen,
                                                 File#file.length,
                                                 crypto:sha_init(), 0,
-                                                Index + Num, Blocks);
+                                                Index + Num, Blocks,
+                                                PIDPieces);
                                 _ ->
                                     %% TODO: handle error
                                     %% invalid torrent file
@@ -301,26 +307,26 @@ check_files([H | T], Hashes, PieceLen, Location, Files, Context, Read, Index,
                             check_files(T, Hashes, PieceLen,
                                         Location - File#file.length,
                                         File#file.length, crypto:sha_init(), 0,
-                                        Index, Blocks)
+                                        Index, Blocks, PIDPieces)
                     end
             end;
         _ ->
             ok
     end;
 check_files([], <<Hash:20/binary>>, PieceLen, _, _, Context, _, Index,
-            Blocks) ->
+            Blocks, PIDPieces) ->
     HashPiece = crypto:sha_final(Context),
     if
         Hash =:= HashPiece ->
-            set_index_state(Index, completed, PieceLen, Blocks);
+            set_index_state(Index, completed, PieceLen, Blocks, PIDPieces);
         true ->
             ok
     end;
-check_files([], _, _, _, _, _, _, _, _) ->
+check_files([], _, _, _, _, _, _, _, _, _) ->
     ok.
 
 check_file(IoDevice, Hashes = <<Hash:20/binary, NewHashes/binary>>, PieceLen,
-           Location, FileSize, Context, Read, Index, Blocks) ->
+           Location, FileSize, Context, Read, Index, Blocks, PIDPieces) ->
     case file:pread(IoDevice, Location, PieceLen - Read) of
         {ok, Data} ->
             if
@@ -330,14 +336,16 @@ check_file(IoDevice, Hashes = <<Hash:20/binary, NewHashes/binary>>, PieceLen,
 
                     if
                         Hash =:= HashPiece ->
-                            set_index_state(Index, completed, PieceLen, Blocks);
+                            set_index_state(Index, completed, PieceLen, Blocks,
+                                            PIDPieces);
                         true ->
                             ok
                     end,
 
                     check_file(IoDevice, NewHashes, PieceLen,
                                Location + PieceLen - Read, FileSize,
-                               crypto:sha_init(), 0, Index + 1, Blocks);
+                               crypto:sha_init(), 0, Index + 1, Blocks,
+                               PIDPieces);
                 true ->
                     if
                         Location + byte_size(Data) =:= FileSize ->
@@ -353,7 +361,7 @@ check_file(IoDevice, Hashes = <<Hash:20/binary, NewHashes/binary>>, PieceLen,
         _ ->
             skip_bytes(Hashes, PieceLen, Location, FileSize, Index)
     end;
-check_file(_, Hashes, PieceLen, Location, FileSize, _, _, Index, _) ->
+check_file(_, Hashes, PieceLen, Location, FileSize, _, _, Index, _, _) ->
     skip_bytes(Hashes, PieceLen, Location, FileSize, Index).
 
 skip_bytes(Hashes, PieceLen, Location, FileSize, Index) ->
@@ -408,10 +416,17 @@ add_index(Block, Path, Pos, Len, TID) ->
             ets:insert(TID, {Block, incompleted, [{Path, Pos, Len}]})
     end.
 
-set_index_state(Index, State, PieceLen, TID) ->
+set_index_state(Index, State, PieceLen, TID, PIDPieces) ->
     N = trunc(PieceLen / ?BLOCK_SIZE),
     Block = Index * N,
-    set_block_state(Block, Block + N, State, TID).
+    set_block_state(Block, Block + N, State, TID),
+
+    case State of
+        completed ->
+            ngbt_pieces:set_bitfield(PIDPieces, Index, true);
+        _ ->
+            ok
+    end.
 
 set_block_state(Block, State, TID) ->
     case ets:lookup(TID, Block) of

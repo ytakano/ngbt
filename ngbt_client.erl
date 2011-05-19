@@ -167,7 +167,8 @@ handle_call({read_torrent, File}, _From, State) ->
 
     PIDFiles = case Reply of
                    ok ->
-                       case ngbt_files:start_link(Torrent#torrent.info) of
+                       case ngbt_files:start_link(Torrent#torrent.info,
+                                                  PIDPieces) of
                            {ok, P2} ->
                                P2;
                            _ ->

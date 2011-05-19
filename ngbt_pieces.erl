@@ -11,7 +11,7 @@
 -behaviour(gen_server).
 
 %% API
--export([start_link/1]).
+-export([start_link/1, stop/1, set_bitfield/3]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
@@ -19,7 +19,7 @@
 
 -define(SERVER, ?MODULE). 
 
--record(state, {num, pieces}).
+-record(state, {num, pieces, bitfield}).
 
 %%%===================================================================
 %%% API
@@ -34,6 +34,26 @@
 %%--------------------------------------------------------------------
 start_link(Num) ->
     gen_server:start_link(?MODULE, [Num], []).
+
+%%--------------------------------------------------------------------
+%% @doc
+%% stop the process
+%%
+%% @spec stop(PID) -> ok
+%% @end
+%%--------------------------------------------------------------------
+stop(PID) ->
+    gen_server:cast(PID, stop).
+
+%%--------------------------------------------------------------------
+%% @doc
+%% Starts the server
+%%
+%% @spec set_bitfield(PID, Pos, Flag) -> ok
+%% @end
+%%--------------------------------------------------------------------
+set_bitfield(PID, Pos, Flag) ->
+    gen_server:cast(PID, {set_bitfield, Pos, Flag}).
 
 %%%===================================================================
 %%% gen_server callbacks
@@ -51,7 +71,7 @@ start_link(Num) ->
 %% @end
 %%--------------------------------------------------------------------
 init([Num]) ->
-    {ok, #state{num = Num, pieces = init_pieces(Num)}}.
+    {ok, #state{num = Num, pieces = init_pieces(Num), bitfield = <<0:Num>>}}.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -81,6 +101,12 @@ handle_call(_Request, _From, State) ->
 %%                                  {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
+handle_cast({set_bitfield, Pos, Flag}, State) ->
+    BitField = set_bitfield0(State#state.bitfield, Pos, Flag),
+    {noreply, State#state{bitfield = BitField}};
+handle_cast(stop, State) ->
+    ets:delete(State#state.pieces),
+    {stop, normal, State};
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
@@ -129,7 +155,21 @@ init_pieces(Num) ->
     init_pieces(0, Num, ets:new(pieces, [set, private])).
 
 init_pieces(N, Num, TID) when N < Num ->
-    ets:insert(TID, {N, false, 0}),
+    ets:insert(TID, {N, 0}),
     init_pieces(N + 1, Num, TID);
 init_pieces(_, _, TID) ->
     TID.
+
+set_bitfield0(BitField, Pos, Flag) when Pos < bit_size(BitField) andalso
+                                        Pos >= 0 ->
+    TailSize = bit_size(BitField) - Pos - 1,
+    <<H:Pos, _:1, T:TailSize>> = BitField,
+
+    case Flag of
+        true ->
+            <<H:Pos, 1:1, T:TailSize>>;
+        _ ->
+            <<H:Pos, 0:1, T:TailSize>>
+    end;
+set_bitfield0(BitField, _, _) ->
+    BitField.
