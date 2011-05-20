@@ -117,7 +117,8 @@ stop_download(PID) ->
 %% @end
 %%--------------------------------------------------------------------
 init([PIDPref]) ->
-    {ok, #state{torrent = #torrent{}, pid_pref = PIDPref, peers = dict:new()}}.
+    {ok, #state{torrent = #torrent{}, pid_pref = PIDPref,
+                peers = ets:new(peers, [set, private])}}.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -238,8 +239,7 @@ handle_info({peers, _, ok, Body}, State)
             io:format("tracker responce:~n"),
             NewState = tracker_res_handler(Res, State),
 
-            %% TODO: contact to peers
-            %%       start timer for announce
+            %% TODO: start timer for announce
 
             {noreply, NewState};
         _ ->
@@ -550,8 +550,19 @@ tracker_res_peers(Res, State) ->
 tracker_res_peer(<<IP1:8, IP2:8, IP3:8, IP4:8, Port:16/integer-big-unsigned,
                    Peers/binary>>, State) ->
     io:format("    IP = ~p, Port = ~p~n", [{IP1, IP2, IP3, IP4}, Port]),
-    NewPeers = dict:append({{IP1, IP2, IP3, IP4}, Port}, undefined,
-                           State#state.peers),
-    tracker_res_peer(Peers, State#state{peers =  NewPeers});
+
+    add_peer(State#state.peers, {IP1, IP2, IP3, IP4}, Port),
+
+    tracker_res_peer(Peers, State);
 tracker_res_peer(_, State) ->
     State.
+
+add_peer(TID, IP, Port) ->
+    case ets:member(TID, {IP, Port}) of
+        true ->
+            ok;
+        false ->
+            %% TODO: contact to peers
+            
+            ets:insert(TID, {{IP, Port}, undefined, undefined})
+    end.
